@@ -1,5 +1,5 @@
 from enum import Enum
-from dataclasses import dataclass, fields, asdict
+from dataclasses import dataclass, fields, asdict, field
 from typing import List
 
 class ReconMethod(str, Enum):
@@ -11,7 +11,7 @@ class ReconMethod(str, Enum):
 @dataclass
 class Configs:
     method: ReconMethod = ReconMethod.STUB
-    shape: List[int] = [256, 256]
+    shape: list[int] = field(default_factory=lambda: [256, 256])
     dataset: str = "stub"
     warmup: int = 1
     runs: int = 5

@@ -10,12 +10,7 @@ from typing import TypeVar, Type
 T = TypeVar("T")
 
 from bench.utils import Configs, Payload_Out, ReconMethod
-
-def fake_recon(x: np.ndarray) -> np.ndarray:
-    # placeholder compute (acts like a "recon method" stub for now)
-    for _ in range(20):
-        x = np.fft.ifft2(np.fft.fft2(x))
-    return np.abs(x)
+from bench.methods import get_method_fxn
 
 def parse_args():
     # Parse arguments from JSON config if given
@@ -62,21 +57,24 @@ def main():
     # placeholder k space input
     x = rng.normal(size=tuple(cfg.shape)) + 1j * rng.normal(size=tuple(cfg.shape))
 
+    # run recon method
+    recon = get_method_fxn(cfg.method)
+
     # warmup
     for _ in range(cfg.warmup):
-        _ = fake_recon(x)
+        _ = recon(x, cfg)
 
     # run a couple times 
     runs = []
     for i in range(cfg.runs):
         t0 = time.perf_counter()
-        y = fake_recon(x)
+        y = recon(x, cfg)
         time_elapsed = time.perf_counter() - t0
         runs.append(time_elapsed)
 
     out = Payload_Out(
         method = cfg.method.value,
-        shape = cfg.shape,
+        shape = list(cfg.shape),
         runs_time = [float(t) for t in runs],
         runs_power=[]
     )

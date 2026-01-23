@@ -1,6 +1,6 @@
 {
     "method": "stub_fft_loop",
-    "shape": [256, 256],
+    "shape": [256, 128],
     "dataset": "stub",
     "warmup": 1,
     "runs": 5
