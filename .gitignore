@@ -4,3 +4,6 @@ __pycache__/
 results/*.json
 results/*.csv
 results/*.png
+data/
+venv/
+results/

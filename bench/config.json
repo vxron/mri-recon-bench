@@ -1,7 +1,8 @@
 {
-    "method": "stub_fft_loop",
-    "shape": [256, 128],
-    "dataset": "stub",
+    "method": "IFFT_BASE",
+    "dataset": "m4raw",
     "warmup": 1,
-    "runs": 5
+    "runs": 5,
+    "bench_mode": "slice",
+    "save_ims": true
 }
