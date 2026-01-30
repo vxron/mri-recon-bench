@@ -128,7 +128,7 @@ def main():
     tracemalloc.stop()
 
     # reset state for next runs
-    methodCfg.baseline_ifft["state"].clear()
+    methodCfg.state.clear()
 
     # (5) GENERATE OUTPUT RESULTS
     out = Payload_Out(

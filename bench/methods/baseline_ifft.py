@@ -32,7 +32,7 @@ def preallocate_buffers(kspace: np.ndarray, methodCfg: MethodConfigs) -> tuple[i
     # preallocate arrays we can reuse
     H = kspace.shape[1]
     W = kspace.shape[2]
-    out_dtype = methodCfg.baseline_ifft.get("im_bit_depth", "float32")
+    out_dtype = methodCfg.im_bit_depth
     
     t0 = time.perf_counter()
     tracemalloc.start()
@@ -54,7 +54,7 @@ def preallocate_buffers(kspace: np.ndarray, methodCfg: MethodConfigs) -> tuple[i
         "tmp": tmp,
     }
     # fill methodCfg object state to feed to baseline_ifft (Python defaults pass by ref)
-    methodCfg.baseline_ifft["state"] = state
+    methodCfg.state = state
 
     return peak, time_elapsed
 
@@ -78,9 +78,9 @@ def baseline_ifft(kspace: np.ndarray, methodCfg: MethodConfigs) -> np.ndarray:
     cfg = methodCfg.baseline_ifft
     use_ifftshift = bool(cfg.get("use_ifftshift", True))
     norm = cfg.get("norm", "ortho")
-    out_dtype = cfg.get("im_bit_depth", "float32")
+    out_dtype = methodCfg.im_bit_depth
     debug_verify = bool(cfg.get("debug_verify", False))
-    gt = cfg.get("ground_truth_im", None)
+    gt = methodCfg.ground_truth_im
 
     if not np.iscomplexobj(kspace):
         raise TypeError("kspace must be complex. If dataset stores real/imag separately, combine first.")
@@ -92,7 +92,7 @@ def baseline_ifft(kspace: np.ndarray, methodCfg: MethodConfigs) -> np.ndarray:
     img_c = np.fft.fftshift(img_c, axes=(-2, -1))
 
     # (3) rss = sqrt(sum_c |img_c|^2)
-    state = methodCfg.baseline_ifft.get("state", None)
+    state = methodCfg.state
     if state is None:
         rss = np.sqrt(np.sum(np.abs(img_c) ** 2, axis=0)) # NumPy allocations
     else:

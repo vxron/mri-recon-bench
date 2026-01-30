@@ -1,12 +1,14 @@
 from enum import Enum
 from dataclasses import dataclass, fields, asdict, field
 from typing import List, Any
+import numpy as np
 
 class ReconMethod(str, Enum):
     CS_L1 = "cs_l1wavelet"
     UNET = "dl_unet"
     SWIN = "dl_swin"
     IFFT_BASE = "baseline_ifft"
+    SENSE = "sense_espirit"
 
 @dataclass
 class Configs:
@@ -20,14 +22,22 @@ class Configs:
 
 @dataclass   
 class MethodConfigs:
+    im_bit_depth: str = "float32"
+    ground_truth_im: np.ndarray = None
+    state: dict[str, Any] = None
+
+    # method specific configs
     baseline_ifft: dict[str, Any] = field(default_factory=lambda:{
-        "state": {}, # dictionary
-        "use_ifftshift": True,
+        "use_ifftshift": True, # for when DC has been centered in kspace 
         "norm": "ortho",
-        "im_bit_depth": "float32",
         "debug_verify": False,
-        "ground_truth_im": None
     })
+    
+    sense_espirit: dict[str, Any] = field(default_factory=lambda: {
+        "debug_verify": False,
+        "device": "cpu"
+    })
+
 
 @dataclass
 class Payload_Out:
