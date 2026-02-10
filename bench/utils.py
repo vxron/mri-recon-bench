@@ -2,6 +2,7 @@ from enum import Enum
 from dataclasses import dataclass, fields, asdict, field
 from typing import List, Any
 import numpy as np
+import sigpy as sp
 
 class ReconMethod(str, Enum):
     CS_L1 = "cs_l1wavelet"
@@ -35,7 +36,14 @@ class MethodConfigs:
     
     sense_espirit: dict[str, Any] = field(default_factory=lambda: {
         "debug_verify": False,
-        "device": "cpu"
+        "sigpy_device": sp.cpu_device,
+        "calib": [24,24],           # [ky,kx] size of fully-sampled central k-space window used to estimate coil maps by ESPIRiT
+        "thresh": 0.02,             # eigenvalue thresh for keeping sensitivity modes in ESPIRiT
+        "kernel_width": 6,          # size of the convolution kernel used in ESPIRiT calibration (how many k-space neighbors are used to model coil correlations)
+        "max_iter": 30,             # number of iterations for the SENSE solver
+        "lambda": 0.0,              # regularization strength (0.0 is pure SENSE = no regularization)
+        "shift_DC": False,          # should be true if DC is centered in the kspace arrays
+        "ksp_dtype": "complex64"    # start with complex64, also complex128 for more accuracy/lower efficiency
     })
 
 

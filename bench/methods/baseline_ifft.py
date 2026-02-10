@@ -73,6 +73,8 @@ def baseline_ifft(kspace: np.ndarray, methodCfg: MethodConfigs) -> np.ndarray:
     """
     if kspace.ndim != 3:
         raise ValueError(f"Expected kspace shape (C,H,W). Got {kspace.shape}")
+    if not np.iscomplexobj(kspace):
+        raise TypeError("kspace must be complex. If dataset stores real/imag separately, combine first.")
 
     # Config defaults
     cfg = methodCfg.baseline_ifft
@@ -81,9 +83,6 @@ def baseline_ifft(kspace: np.ndarray, methodCfg: MethodConfigs) -> np.ndarray:
     out_dtype = methodCfg.im_bit_depth
     debug_verify = bool(cfg.get("debug_verify", False))
     gt = methodCfg.ground_truth_im
-
-    if not np.iscomplexobj(kspace):
-        raise TypeError("kspace must be complex. If dataset stores real/imag separately, combine first.")
 
     # (2) IFFT per coil
     k = np.fft.ifftshift(kspace, axes=(-2, -1)) if use_ifftshift else kspace
@@ -158,3 +157,7 @@ def baseline_ifft(kspace: np.ndarray, methodCfg: MethodConfigs) -> np.ndarray:
         return rss
     else:
         return out
+
+def cleanup(methodCfg: MethodConfigs):
+    # clear state
+    methodCfg.state.clear()
