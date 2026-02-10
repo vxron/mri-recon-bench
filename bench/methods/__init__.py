@@ -39,3 +39,9 @@ def get_setup_fxn(method: ReconMethod):
         return PREPARE_SETUP[method]
     except KeyError:
         raise ValueError(f"Unknown method: {method}")
+
+def get_cleanup_fxn(method: ReconMethod):
+    try:
+        return CLEANUP[method]
+    except KeyError:
+        raise ValueError(f"Unknown method: {method}")

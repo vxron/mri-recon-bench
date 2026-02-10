@@ -1,4 +1,3 @@
-# bench/methods/rss_ifft.py
 """
 RSS + IFFT baseline (standard Cartesian multi-coil MRI sanity check)
 
@@ -58,6 +57,7 @@ def preallocate_buffers(kspace: np.ndarray, methodCfg: MethodConfigs) -> tuple[i
 
     return peak, time_elapsed
 
+
 def baseline_ifft(kspace: np.ndarray, methodCfg: MethodConfigs) -> np.ndarray:
     """
     Args:
@@ -71,10 +71,6 @@ def baseline_ifft(kspace: np.ndarray, methodCfg: MethodConfigs) -> np.ndarray:
     Returns:
       rss image (H, W) float
     """
-    if kspace.ndim != 3:
-        raise ValueError(f"Expected kspace shape (C,H,W). Got {kspace.shape}")
-    if not np.iscomplexobj(kspace):
-        raise TypeError("kspace must be complex. If dataset stores real/imag separately, combine first.")
 
     # Config defaults
     cfg = methodCfg.baseline_ifft
@@ -83,15 +79,24 @@ def baseline_ifft(kspace: np.ndarray, methodCfg: MethodConfigs) -> np.ndarray:
     out_dtype = methodCfg.im_bit_depth
     debug_verify = bool(cfg.get("debug_verify", False))
     gt = methodCfg.ground_truth_im
+    state = methodCfg.state
 
-    # (2) IFFT per coil
+    if kspace.ndim != 3:
+        raise ValueError(f"Expected kspace shape (C,H,W). Got {kspace.shape}")
+    if not np.iscomplexobj(kspace):
+        raise TypeError("kspace must be complex. If dataset stores real/imag separately, combine first.")
+
+    # (2) IFFT per coil (Preprocessing not included in memory/runtime outputs)
     k = np.fft.ifftshift(kspace, axes=(-2, -1)) if use_ifftshift else kspace
+    
+    # =========================== TIME/MEMORY TRACKING STARTS =======================
+    t0 = time.perf_counter()
+    tracemalloc.start()
     # Compute coil images: shape (C,H,W), complex
     img_c = np.fft.ifft2(k, axes=(-2, -1), norm=norm)
     img_c = np.fft.fftshift(img_c, axes=(-2, -1))
 
     # (3) rss = sqrt(sum_c |img_c|^2)
-    state = methodCfg.state
     if state is None:
         rss = np.sqrt(np.sum(np.abs(img_c) ** 2, axis=0)) # NumPy allocations
     else:
@@ -119,6 +124,11 @@ def baseline_ifft(kspace: np.ndarray, methodCfg: MethodConfigs) -> np.ndarray:
             out[:] = rss # put rss directly into out buffer
         else:
             np.copyto(out, rss, casting="unsafe") # avoids allocation
+        
+    elapsed = time.perf_counter() - t0
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    # =========================== TIME/MEMORY TRACKING ENDS =======================
 
     # (5) Verification against ground truth image if available/allowed
     if debug_verify:
@@ -154,9 +164,10 @@ def baseline_ifft(kspace: np.ndarray, methodCfg: MethodConfigs) -> np.ndarray:
                       f"use_ifftshift={use_ifftshift}, norm={norm}")
 
     if state is None:
-        return rss
+        return rss, peak, elapsed
     else:
-        return out
+        return out, peak, elapsed
+
 
 def cleanup(methodCfg: MethodConfigs):
     # clear state
