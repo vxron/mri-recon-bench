@@ -13,7 +13,7 @@ import csv
 # Generic type
 T = TypeVar("T")
 
-from bench.utils import Configs, MethodConfigs, Payload_Out, ReconMethod, DATA, ROOT, RESULTS
+from bench.utils import Configs, MethodConfigs, Payload_Out, ReconMethod, DATA, ROOT, RESULTS, SETUP_KWARGS
 from bench.methods import get_method_fxn, get_setup_fxn, get_cleanup_fxn
 from bench.data_loaders.m4raw import pick_first_h5, load_m4raw_kspace
 
@@ -141,6 +141,7 @@ def main():
     # (1) INIT CONFIGS
     cfg = Configs()
     methodCfg = MethodConfigs()
+    currMethod_ = ReconMethod.IFFT_BASE
 
     args = parse_args()
     if args.config is not None:
@@ -177,8 +178,9 @@ def main():
     if cfg.output_level == "detail":
         all_results = [] # for csv export
     for meth in cfg.methods:
+        currMethod_ = meth
         recon = get_method_fxn(meth)
-        setup = get_setup_fxn(meth)
+        setup = get_setup_fxn(meth, **SETUP_KWARGS.get(meth,{}))
         cleanup = get_cleanup_fxn(meth)
 
         # 1) setup (one-time cost for allocations, plans, buffers, model init, etc)
