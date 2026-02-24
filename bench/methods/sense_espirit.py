@@ -1,5 +1,5 @@
 from __future__ import annotations
-from bench.utils import Configs, MethodConfigs, ReconMethod, RESULTS
+from bench.utils import Configs, MethodConfigs, ReconMethod, RESULTS, make_vds_ky_mask
 import numpy as np
 import tracemalloc
 import time
@@ -72,60 +72,6 @@ def preprocess_kspace(kspace: np.ndarray, *, out_dtype=np.complex64) -> np.ndarr
     return (ksp if in_is_centered else np.fft.fftshift(ksp, axes=(-2,-1))), in_is_centered
 
 
-def make_uniform_ky_mask(H: int, W: int, *, R: int, acs: int):
-    """
-    Uniform undersampling in ky with fully sampled ACS band, at desired acceleration factor (R).
-    (i.e.: zeroing out certain phase encode lines to simulate what we would use in L1-wavelet recon)
-    Returns mask2d (H,W) float32.
-    Obsolete for CS methods because pseudo-random sampling is necessary -> NOT UNIFORM
-    """
-    mask = np.zeros((H, W), np.float32)
-
-    # uniform ky lines
-    mask[::R, :] = 1.0
-
-    # ACS band
-    cy = H // 2
-    half = acs // 2
-    mask[max(cy - half, 0): min(cy + half, H), :] = 1.0
-    return mask
-
-def make_vds_ky_mask(H: int, W: int, *, R: int, acs: int, seed: int = 42) -> np.ndarray:
-    """
-    Variable-density random undersampling in ky (pseudo-random sampling REQUIRED for CS/L1-wavelet).
-    Fully samples ACS center, randomly samples outer ky with density ~ 1/|ky|
-    so lower frequencies are sampled more densely (matches MRI signal energy distribution).
-    """
-    mask = np.zeros((H, W), np.float32)
-    rng = np.random.default_rng(seed)
-
-    cy = H // 2
-    half_acs = acs // 2
-
-    # (1) fully sample ACS band
-    acs_lo = max(cy - half_acs, 0)
-    acs_hi = min(cy + half_acs, H)
-    mask[acs_lo:acs_hi, :] = 1.0
-
-    # (2) variable density for outer ky lines
-    # target: acquire (H/R - acs) lines from outside the ACS
-    target_total = H // R
-    target_outer = max(target_total - acs, 0)
-
-    outer_lines = [i for i in range(H) if i < acs_lo or i >= acs_hi]
-
-    # density ~ 1 / (distance from center + 1), normalized to probability
-    dist = np.array([abs(i - cy) for i in outer_lines], dtype=np.float32)
-    density = 1.0 / (dist + 1.0)
-    density /= density.sum()
-
-    n_outer = min(target_outer, len(outer_lines))
-    chosen = rng.choice(outer_lines, size=n_outer, replace=False, p=density)
-    mask[chosen, :] = 1.0
-
-    return mask
-
-
 def debug_plot_espirit_maps(methodCfg: MethodConfigs, maps, max_coils=8):
     """
     Plot magnitude of ESPIRiT sensitivity maps for a couple coils only
@@ -151,6 +97,7 @@ def debug_plot_espirit_maps(methodCfg: MethodConfigs, maps, max_coils=8):
     plt.tight_layout()
     plt.savefig(out_dir / "sensitivity_map.png", dpi=150)
     plt.close()
+
 
 def setup_and_espirit(kspace: np.ndarray, methodCfg: MethodConfigs, **kwargs):
     """
@@ -374,10 +321,6 @@ def run_l1wavelet_solver(kspace: np.ndarray, methodCfg: MethodConfigs) -> np.nda
     ksp_scale = methodCfg.state.get("ksp_scale", 1.0)
     ksp = ksp / ksp_scale
 
-    # =========================== TIME/MEMORY TRACKING STARTS ===================================
-    tracemalloc.start()
-    t0 = time.perf_counter()
-
     if "maps" not in methodCfg.state:
         # no setup was run -> need to build maps on the fly
         espirit_grid = int(cfg.get("calib", 24,))
@@ -395,12 +338,13 @@ def run_l1wavelet_solver(kspace: np.ndarray, methodCfg: MethodConfigs) -> np.nda
         # no setup was run -> need to build mask on the fly
         methodCfg.state["mask2d"] = make_vds_ky_mask(kspace.shape[1], kspace.shape[2], R=R, acs=acs)
     
-    mask2d = methodCfg.state["mask2d"] 
-    w = mask2d[None, ...]                    # (1,H,W) broadcastable
-    # apply sampling for CS
-    ksp = ksp * w
-    
-    if debug:
+    if simulate_undersampling:
+        mask2d = methodCfg.state["mask2d"] 
+        w = mask2d[None, ...]                    # (1,H,W) broadcastable
+        # apply sampling for CS
+        ksp = ksp * w
+
+    if debug and simulate_undersampling:
         # CS+L1 wavelet
         acquired_frac = float(mask2d.mean())
 
@@ -429,6 +373,10 @@ def run_l1wavelet_solver(kspace: np.ndarray, methodCfg: MethodConfigs) -> np.nda
         plt.savefig(out_dir / "mask_debug.png", dpi=150)
         plt.close()
         print(f"[l1wavelet] mask debug plot saved to {out_dir / 'mask_debug.png'}")
+
+    # =========================== TIME/MEMORY TRACKING STARTS ===================================
+    tracemalloc.start()
+    t0 = time.perf_counter()
        
     # Solve the CS objective with L1-Wavelet regularization 
     # 'weights=w' restricts the data-consistency term to acquired k-space locations (mask M)
