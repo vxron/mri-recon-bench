@@ -1,5 +1,5 @@
 from __future__ import annotations
-from bench.utils import Configs, MethodConfigs, ReconMethod, RESULTS, make_vds_ky_mask
+from bench.utils import Configs, MethodConfigs, ReconMethod, RESULTS
 import numpy as np
 import tracemalloc
 import time
@@ -120,9 +120,9 @@ def setup_and_espirit(kspace: np.ndarray, methodCfg: MethodConfigs, **kwargs):
         cfg = methodCfg.sense_espirit
     else:
         cfg = methodCfg.cs_l1_wavelet
-        R = int(cfg.get("R", 4))
-        acs = int(cfg.get("acs", 24))
-        simulate_undersampling = bool(cfg.get("simulate_undersampling", True))
+        mask = methodCfg.undersampling_mask
+        R = int(mask.get("R", 2))
+    simulate_undersampling = bool(cfg.get("simulate_undersampling", True))
 
     debug = bool(cfg.get("debug_verify", False))
     espirit_grid = int(cfg.get("calib", 24))
@@ -133,17 +133,23 @@ def setup_and_espirit(kspace: np.ndarray, methodCfg: MethodConfigs, **kwargs):
 
     # don't include preprocessing in time/memory computations
     ksp, was_centered = preprocess_kspace(kspace, out_dtype=ksp_type)
-    print("input centered?", was_centered)
-    # is our dataset actually undersampled (R_eff >> 1) or fully sampled (R_eff ~1) and whether ACS region looks reasonable
-    mask2d_inferred, R_eff, acs_eff, meta = infer_cartesian_sampling(ksp)
-    print(f"[setup] inferred sampling: R_eff={R_eff:.2f}x, acs_eff={acs_eff}px, "
-          f"acquired_ky={meta['acquired_ky']} ({meta['ky_acq_frac']*100:.1f}%)")
-    if meta["ky_acq_frac"] > 0.95:
-        print("[setup] WARNING: k-space appears fully sampled — undersampling may not be active")
+    if debug:
+        print("input centered?", was_centered)
+        # is our dataset actually undersampled (R_eff >> 1) or fully sampled (R_eff ~1) and whether ACS region looks reasonable
+        mask2d_inferred, R_eff, acs_eff, meta = infer_cartesian_sampling(ksp)
+        print(f"[setup] inferred sampling: R_eff={R_eff:.2f}x, acs_eff={acs_eff}px, "
+              f"acquired_ky={meta['acquired_ky']} ({meta['ky_acq_frac']*100:.1f}%)")
+        if meta["ky_acq_frac"] > 0.95:
+            print("[setup] WARNING: k-space appears fully sampled — undersampling may not be active")
 
     # normalize for ESPIRiT the same way we do for SENSE/CS solving so that we don't have a mismatch in coil sensitivty mapping images
     ksp_scale = float(np.abs(ksp).max()) + 1e-12
     ksp_norm = ksp / ksp_scale
+
+    if simulate_undersampling:
+        mask2d = methodCfg.undersampling_mask["mask2d"]
+        if mask2d is None:
+            raise RuntimeError("No shared mask found - was it built in run_bench.py?")
 
     # =========================== TIME/MEMORY TRACKING STARTS =======================
     t0 = time.perf_counter()
@@ -166,10 +172,6 @@ def setup_and_espirit(kspace: np.ndarray, methodCfg: MethodConfigs, **kwargs):
     # reusable resources
     out_buf = np.empty((H,W), dtype=np.float32) # to avoid allocating a new array for mag each run of sense
 
-    # if it's L1 wavelet, we can make sampling mask ahead of time...
-    if curr_method == ReconMethod.CS_L1 and simulate_undersampling:
-        mask2d = make_vds_ky_mask(H, W, R=R, acs=acs)
-
     _, peak = tracemalloc.get_traced_memory()
     tracemalloc.stop()
     time_elapsed = time.perf_counter() - t0
@@ -180,7 +182,7 @@ def setup_and_espirit(kspace: np.ndarray, methodCfg: MethodConfigs, **kwargs):
         "ksp_scale": ksp_scale, # normalization amount of kspace for consistency btwn espirit & solver
         "device": device,
         "out_buf": out_buf,
-        "mask2d": mask2d if curr_method == ReconMethod.CS_L1 and simulate_undersampling else None
+        "mask2d": mask2d if simulate_undersampling else None
     }
     methodCfg.state = state
     
@@ -304,6 +306,7 @@ def run_l1wavelet_solver(kspace: np.ndarray, methodCfg: MethodConfigs) -> np.nda
 
     # (1) use config defaults
     cfg = methodCfg.cs_l1_wavelet
+    mask = methodCfg.undersampling_mask
     device = cfg.get("sigpy_device", sp.Device(-1))
     wavelet_max_iter = int(cfg.get("max_iter", 30))
     lambda_reg = cfg.get("lambda", 1e-3)
@@ -312,8 +315,8 @@ def run_l1wavelet_solver(kspace: np.ndarray, methodCfg: MethodConfigs) -> np.nda
     outType = methodCfg.im_bit_depth
     debug = bool(cfg.get("debug_verify", False))
     wave_basis = cfg.get("wavelet_basis", "db4")
-    R = int(cfg.get("R", 4))
-    acs = int(cfg.get("acs", 24))
+    R = int(mask.get("R", 2))
+    acs = int(mask.get("acs", 32))
     simulate_undersampling = bool(cfg.get("simulate_undersampling", True))
 
     # (2) PREPROCESS
@@ -335,8 +338,8 @@ def run_l1wavelet_solver(kspace: np.ndarray, methodCfg: MethodConfigs) -> np.nda
     maps = methodCfg.state["maps"]
 
     if "mask2d" not in methodCfg.state and simulate_undersampling:
-        # no setup was run -> need to build mask on the fly
-        methodCfg.state["mask2d"] = make_vds_ky_mask(kspace.shape[1], kspace.shape[2], R=R, acs=acs)
+        # no setup was run
+        methodCfg.state["mask2d"] = methodCfg.undersampling_mask["mask2d"]
     
     if simulate_undersampling:
         mask2d = methodCfg.state["mask2d"] 

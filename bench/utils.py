@@ -48,11 +48,19 @@ class MethodConfigs:
     ground_truth_im: np.ndarray | None = None 
     state: dict[str, Any] = None
 
+    undersampling_mask: dict[str, Any] = field(default_factory=lambda:{
+        "acs": 32,                     # ACS calibration region size (number of fully sampled ky lines in the center) -> from which weights are learned to interpolate missing k-space points
+        "R": 2,                        # acceleration factor (how much of the data was undersampled)
+        "seed": 42,                    # for deterministic runs
+        "mask2d": None,                # created once at bench startup, shared across all methods
+    })
+
     # method specific configs
     baseline_ifft: dict[str, Any] = field(default_factory=lambda:{
-        "use_ifftshift": True, # for when DC has been centered in kspace 
+        "use_ifftshift": True,         # for when DC has been centered in kspace 
         "norm": "ortho",
         "debug_verify": False,
+        "simulate_undersampling": False 
     })
     
     sense_espirit: dict[str, Any] = field(default_factory=lambda: {
@@ -62,8 +70,9 @@ class MethodConfigs:
         "thresh": 0.02,                # eigenvalue thresh for keeping sensitivity modes in ESPIRiT
         "kernel_width": 6,             # size of the convolution kernel used in ESPIRiT calibration (how many k-space neighbors are used to model coil correlations)
         "max_iter": 50,                # number of iterations for the SENSE solver
-        "lambda": 5e-3,               # regularization strength (0.0 is pure SENSE = no regularization)
-        "ksp_dtype": np.complex128     # start with complex64, also complex128 for more accuracy/lower efficiency
+        "lambda": 5e-3,                # regularization strength (0.0 is pure SENSE = no regularization)
+        "ksp_dtype": np.complex128,    # start with complex64, also complex128 for more accuracy/lower efficiency
+        "simulate_undersampling": False 
     })
 
     cs_l1_wavelet: dict[str, Any] = field(default_factory= lambda: {
@@ -78,22 +87,21 @@ class MethodConfigs:
         "wavelet_basis": "db4",        # wavelet transform basis kernel that gets slid over image for decomposing into wavelets... 
                                        # db4 is standard default for mri; '4' refers to how many polynomial orders the wavelet "ignores" for better rep of curves
                                        # alternative: Haar's template [1, 1, -1, -1]: fires at edges (sees boxy transitions)
-        "acs": 32,                     # fully sampled center of k-space (number of fully sampled central lines)
-        "R": 2,                        # acceleration factor (how much of the data was undersampled)
-        "simulate_undersampling": True # for fully acquired k-space datasets, need to simulate undersampling for cs to be tested appropriately
+        "simulate_undersampling": True
     })
 
     grappa: dict[str, Any] = field(default_factory=lambda: {
-        "calib": 32,                   # ACS calibration region size (number of fully sampled ky lines in the center) -> from which weights are learned to interpolate missing k-space points
         "kernel_size": (6,6),          # GRAPPA kernel size in (ky,kx), i.e. local neighborhood used to interpolate missing samples
         "coil_axis": 0,                # which axis is the coil dimension in kspace (C,H,W), axis C contains coils
         "debug_verify": False,
         "lambda": 1e-3,        
         "ksp_dtype": np.complex128,
-        "R": 2,
         "simulate_undersampling": True # for fully acquired k-space datasets, need to simulate undersampling for cs to be tested appropriately
     })
 
+    u_net_fft: dict[str, Any] = field(default_factory=lambda: {
+        "simulate_undersampling": True
+    }) 
 
 @dataclass
 class Payload_Out:

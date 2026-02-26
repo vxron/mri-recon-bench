@@ -1,6 +1,6 @@
 from __future__ import annotations
 import numpy as np
-from bench.utils import Configs, MethodConfigs, ReconMethod, make_vds_ky_mask
+from bench.utils import Configs, MethodConfigs, ReconMethod
 import tracemalloc
 import time
 import pygrappa
@@ -8,7 +8,8 @@ import pygrappa
 def preallocate_buffers(kspace: np.ndarray, methodCfg: MethodConfigs) -> tuple[int,float]:
     # read config
     cfg = methodCfg.grappa
-    calib = int(cfg.get("calib",32))
+    mask = methodCfg.undersampling_mask
+    calib = int(mask.get("acs",32))
     ksp_dtype = cfg.get("ksp_dtype", np.complex64)
     out_dtype = methodCfg.im_bit_depth
     H = kspace.shape[1]
@@ -31,7 +32,9 @@ def preallocate_buffers(kspace: np.ndarray, methodCfg: MethodConfigs) -> tuple[i
 
     # simulate undersampling (like with cs)
     if simulate_undersampling:
-        mask = make_vds_ky_mask(H, W, R=R, acs=calib)
+        mask = methodCfg.undersampling_mask["mask2d"]
+        if mask is None:
+            raise RuntimeError("No shared mask found - was it built in run_bench.py?")
 
     # reusable buffers for rss comps
     rss_accum = np.empty((H, W), dtype=np.float64)
@@ -52,7 +55,7 @@ def preallocate_buffers(kspace: np.ndarray, methodCfg: MethodConfigs) -> tuple[i
         "tmp": tmp,
         "ksp_scale": ksp_scale,
         "acs": acs_region,
-        "mask2d": mask if simulate_undersampling else None,
+        "mask2d": mask if simulate_undersampling else None
     }
     methodCfg.state = state
 
@@ -75,9 +78,10 @@ def preprocess_kspace(kspace: np.ndarray, *, out_dtype=np.complex64) -> np.ndarr
 def run_grappa(kspace: np.ndarray, methodCfg: MethodConfigs) -> np.ndarray:
     # (1) read configs
     cfg = methodCfg.grappa
+    mask = methodCfg.undersampling_mask
     kernel_size = cfg.get("kernel_size", (5,5))
     coil_axis = int(cfg.get("coil_axis", 0))
-    calib = int(cfg.get("calib",32))
+    calib = int(mask.get("acs",32))
     ksp_type = cfg.get("ksp_dtype", np.complex64)
     acs = methodCfg.state["acs"]
     lambda_g = float(cfg.get("lambda", 1e-3))
@@ -95,9 +99,7 @@ def run_grappa(kspace: np.ndarray, methodCfg: MethodConfigs) -> np.ndarray:
 
     if "mask2d" not in methodCfg.state and simulate_undersampling:
         # no setup was run -> need to build mask on the fly
-        acs = methodCfg.state["acs"]
-        R = int(cfg.get("R", 2))
-        methodCfg.state["mask2d"] = make_vds_ky_mask(kspace.shape[1], kspace.shape[2], R=R, acs=calib)
+        methodCfg.state["mask2d"] = methodCfg.undersampling_mask["mask2d"]
 
     if simulate_undersampling:
         mask = methodCfg.state["mask2d"]
