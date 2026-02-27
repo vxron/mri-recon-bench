@@ -10,13 +10,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]   # mri-recon-bench/
 DATA = ROOT / "data"
 RESULTS = ROOT / "results"
+MODEL_REUSE_PATH = ROOT / "results/unet_m4raw.pt"
 
 # ENUMS / DICTIONARIES
 
 class ReconMethod(str, Enum):
     CS_L1 = "cs_l1wavelet"
     UNET = "dl_unet"
-    SWIN = "dl_swin"
+    VARNET = "dl_varnet"
     IFFT_BASE = "baseline_ifft"
     SENSE = "sense_espirit"
     GRAPPA = "grappa"
@@ -25,7 +26,9 @@ SETUP_KWARGS = {
     ReconMethod.SENSE: {"curr_method": ReconMethod.SENSE},
     ReconMethod.CS_L1: {"curr_method": ReconMethod.CS_L1},
     ReconMethod.GRAPPA: {}, # no addtn kwargs
-    ReconMethod.IFFT_BASE: {}
+    ReconMethod.IFFT_BASE: {} # no addtn kwargs
+    ReconMethod.UNET: {"train_new": False} # set at runtime
+    ReconMethod.VARNET: {"train_new": False} # set at runtime
 }
 
 # DATACLASSES
@@ -36,6 +39,7 @@ class Configs:
     methods: list[ReconMethod] = field(default_factory=lambda: [ReconMethod.IFFT_BASE, ReconMethod.SENSE, ReconMethod.CS_L1, ReconMethod.GRAPPA])
     shape: list[int] = field(default_factory=lambda: [256, 256])
     dataset: str = "m4raw"
+    train_new: bool = True # for DL approaches whether we train a new model on the iter or reuse existing
     setups: int = 3 # can be 0 if we want to omit setup tests
     runs: int = 5
     bench_mode: str = "slice" # "slice" | "volume"
@@ -99,8 +103,13 @@ class MethodConfigs:
         "simulate_undersampling": True # for fully acquired k-space datasets, need to simulate undersampling for cs to be tested appropriately
     })
 
-    u_net_fft: dict[str, Any] = field(default_factory=lambda: {
-        "simulate_undersampling": True
+    unet: dict[str, Any] = field(default_factory=lambda: {
+        "simulate_undersampling": True,
+        "max_iters": 30,              # max training iters
+        "batch_size": 2               # num of examples per training epoch
+        "lr": 1e-4,                   # learning rate during training steps
+        "use_ifftshift": True,        # for when DC has been centered in kspace 
+        "n_decode_blks_to_freeze": 3  # how many we conserve from existing arch (no training on these) 
     }) 
 
 @dataclass
@@ -172,3 +181,13 @@ def make_vds_ky_mask(H: int, W: int, *, R: int, acs: int, seed: int = 42) -> np.
 
     return mask
 
+def kspace_to_x_image(kspace: np.ndarray, mask2d: np.ndarray, use_ifftshift: bool) -> np.ndarray:
+    """
+    Shared preprocessing: masked kspace -> zero-filled magnitude image (H,W) 
+    Used in training & inference of image-to-image DL methods
+    """
+    ksp_us = kspace * mask2d[None, ...]
+    ksp_us = np.fft.ifftshift(ksp_us, axes=(-2,-1)) if use_ifftshift else ksp_us
+    imgs = np.fft.ifft2(ksp_us, axes=(-2,-1), norm="ortho")
+    imgs = np.fft.fftshift(imgs, axes=(-2,-1))
+    return np.sqrt(np.sum(np.abs(imgs) ** 2, axis=0)).astype(np.float32)  # RSS -> (H,W)

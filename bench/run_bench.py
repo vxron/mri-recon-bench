@@ -153,7 +153,7 @@ def main():
         case "m4raw":
             DATA_M4RAW = DATA / "m4raw_zenodo" / "multicoil_test"
             h5_path = pick_first_h5(DATA_M4RAW)
-            kspace_in, rss_gt, meta = load_m4raw_kspace(h5_path)
+            kspace_all, rss_gt, meta = load_m4raw_kspace(h5_path)
             print("Loaded M4Raw:", h5_path.name)
             print("Keys:", meta["keys"])
             print("Attrs:", meta["attrs"])
@@ -163,10 +163,10 @@ def main():
             return
     
     # (3) SETUP CONFIGS & PREPROCESS TO FIT EXPECTED SHAPE FOR RECON METHOD 
-    if kspace_in.ndim == 4 and cfg.bench_mode == "slice": # often given (S,C,H,W), ex. in m4raw
+    if kspace_all.ndim == 4 and cfg.bench_mode == "slice": # often given (S,C,H,W), ex. in m4raw
         # narrow to a single z-slice -> (C,H,W)
-        S = kspace_in.shape[0]
-        kspace_in = kspace_in[S // 2] # select the middle slice
+        S = kspace_all.shape[0]
+        kspace_in = kspace_all[S // 2] # select the middle slice
         rss_gt_slice = rss_gt[S // 2] 
         if rss_gt_slice is not None:
             methodCfg.ground_truth_im = rss_gt_slice
@@ -184,8 +184,12 @@ def main():
     methodCfg.undersampling_mask["mask2d"] = shared_mask
 
     # (5) RUN RECON METHOD
+    if cfg.train_new == True:
+        SETUP_KWARGS[ReconMethod.UNET]["train_new"] = True
+        SETUP_KWARGS[ReconMethod.VARNET]["train_new"] = True
     if cfg.output_level == "detail":
         all_results = [] # for csv export
+
     for meth in cfg.methods:
         currMethod_ = meth
         recon = get_method_fxn(meth)
@@ -198,7 +202,11 @@ def main():
         if cfg.setups > 0:
             for _ in range(cfg.setups):
                 gc.collect()
-                setup_mem, setup_time = setup(kspace_in, methodCfg)
+                if cfg.train_new and meth in [ReconMethod.UNET, ReconMethod.VARNET]:
+                    # want to run training in setup, need to pass full ksp
+                    setup_mem, setup_time = setup(kspace_all, methodCfg)
+                else:
+                    setup_mem, setup_time = setup(kspace_in, methodCfg)
                 setup_times.append(setup_time)
                 setup_mem_use_peak.append(setup_mem)
 

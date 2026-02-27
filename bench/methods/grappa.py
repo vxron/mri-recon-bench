@@ -14,7 +14,7 @@ def preallocate_buffers(kspace: np.ndarray, methodCfg: MethodConfigs) -> tuple[i
     out_dtype = methodCfg.im_bit_depth
     H = kspace.shape[1]
     W = kspace.shape[2]
-    R = int(cfg.get("R", 2))
+    R = int(mask.get("R", 2))
     simulate_undersampling = bool(cfg.get("simulate_underampling", True))
 
     t0 = time.perf_counter()
@@ -60,6 +60,7 @@ def preallocate_buffers(kspace: np.ndarray, methodCfg: MethodConfigs) -> tuple[i
     methodCfg.state = state
 
     return peak, time_elapsed
+
 
 def preprocess_kspace(kspace: np.ndarray, *, out_dtype=np.complex64) -> np.ndarray:
     ksp = kspace.astype(out_dtype, copy=False)
