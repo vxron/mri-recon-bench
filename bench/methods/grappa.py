@@ -15,7 +15,7 @@ def preallocate_buffers(kspace: np.ndarray, methodCfg: MethodConfigs) -> tuple[i
     H = kspace.shape[1]
     W = kspace.shape[2]
     R = int(mask.get("R", 2))
-    simulate_undersampling = bool(cfg.get("simulate_underampling", True))
+    simulate_undersampling = bool(cfg.get("simulate_undersampling", True))
 
     t0 = time.perf_counter()
     tracemalloc.start()
@@ -119,9 +119,9 @@ def run_grappa(kspace: np.ndarray, methodCfg: MethodConfigs) -> np.ndarray:
     solved_ksp = np.moveaxis(solved_ksp, -1, 0)  # (H,W,C) -> (C,H,W) so IFFT takes the right {H,W}
 
     # (4) IFFT filled k-space to recover im
-    img_c = np.fft.ifftshift(solved_ksp, axes=(-2, -1))  # move DC to corner before ifft2   
-    img_c = np.fft.ifft2(img_c, axes=(-2, -1))           # ifft expects DC at [0,0]
-    img_c = np.fft.fftshift(img_c, axes=(-2, -1))        # shift result so DC is centered for display
+    img_c = np.fft.ifftshift(solved_ksp, axes=(-2, -1))       # move DC to corner before ifft2   
+    img_c = np.fft.ifft2(img_c, axes=(-2, -1), norm="ortho")  # ifft expects DC at [0,0]
+    img_c = np.fft.fftshift(img_c, axes=(-2, -1))             # shift result so DC is centered for display
 
     # (5) RSS combine across coils
     if methodCfg.state is None:
@@ -136,6 +136,9 @@ def run_grappa(kspace: np.ndarray, methodCfg: MethodConfigs) -> np.ndarray:
             np.square(tmp, out=tmp)
             rss += tmp
         np.sqrt(rss, out=rss)
+    rss *= ksp_scale
+    out = methodCfg.state["out_buf"]
+    np.copyto(out, rss, casting="unsafe")
 
     # (6) fill output buffer
     if methodCfg.state is None: # numpy astype allocations

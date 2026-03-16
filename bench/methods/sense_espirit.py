@@ -234,11 +234,11 @@ def run_sense_solver(kspace: np.ndarray, methodCfg: MethodConfigs) -> np.ndarray
 
     # (3) RUN SENSE
     # Create mask to ensure no missing NaNs, 0s in kspace to SENSE
-    kabs = np.abs(ksp).sum(axis=0)
-    thr = 1e-12 * np.max(kabs)      # start extremely low
-    mask = (kabs > thr).astype(np.float32)
-    w = mask[None, ...]
-    print("acquired fraction (thr):", mask.mean())
+    mask2d = methodCfg.state.get("mask2d")
+    if mask2d is None:
+        mask2d = methodCfg.undersampling_mask["mask2d"]
+    w = mask2d[None, ...]
+    ksp = ksp * mask2d[None, ...]  # explicitly zero unacquired lines
 
     # use prealloc buffer
     im = SenseRecon(
@@ -250,11 +250,13 @@ def run_sense_solver(kspace: np.ndarray, methodCfg: MethodConfigs) -> np.ndarray
             out = np.abs(im).astype(np.float32, copy=False) #  mag only (no im)
         elif outType == "float64":
             out = np.abs(im).astype(np.float64, copy=False)
+        out *= ksp_scale
     else:
         # take reference to prealloc buffer object
         out_buf = methodCfg.state["out_buf"]
         # compute the magnitude |im| elementwise and store directly into out_buf using Numpy out=
         np.abs(im, out=out_buf)
+        out_buf *= ksp_scale # undo normalization so units match
 
     time_elapsed = time.perf_counter() - t0
     _, peak = tracemalloc.get_traced_memory()
@@ -392,9 +394,11 @@ def run_l1wavelet_solver(kspace: np.ndarray, methodCfg: MethodConfigs) -> np.nda
             out = np.abs(im).astype(np.float32, copy=False)
         elif outType == "float64":
             out = np.abs(im).astype(np.float64, copy=False)
+        out *= ksp_scale
     else:
         out_buf = methodCfg.state["out_buf"]
         np.abs(im, out=out_buf)
+        out_buf *= ksp_scale
 
     time_elapsed = time.perf_counter() - t0
     _, peak = tracemalloc.get_traced_memory()

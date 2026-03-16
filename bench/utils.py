@@ -37,7 +37,7 @@ SETUP_KWARGS = {
 @dataclass
 class Configs:
     # default methods list factory :)
-    methods: list[ReconMethod] = field(default_factory=lambda: [ReconMethod.UNET, ReconMethod.VARNET, ReconMethod.CS_L1, ReconMethod.IFFT_BASE, ReconMethod.GRAPPA, ReconMethod.SENSE])
+    methods: list[ReconMethod] = field(default_factory=lambda: [ReconMethod.CS_L1, ReconMethod.IFFT_BASE, ReconMethod.GRAPPA, ReconMethod.SENSE, ReconMethod.UNET, ReconMethod.VARNET])
     shape: list[int] = field(default_factory=lambda: [256, 256])
     dataset: str = "m4raw"
     train_new: bool = True # for DL approaches whether we train a new model on the iter or reuse existing
@@ -77,7 +77,7 @@ class MethodConfigs:
         "max_iter": 50,                # number of iterations for the SENSE solver
         "lambda": 5e-3,                # regularization strength (0.0 is pure SENSE = no regularization)
         "ksp_dtype": np.complex128,    # start with complex64, also complex128 for more accuracy/lower efficiency
-        "simulate_undersampling": False 
+        "simulate_undersampling": True 
     })
 
     # the default_factory tells dataclass to call the lambda each time a new instance is created so every instances gets its own fresh dict instance

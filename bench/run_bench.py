@@ -230,6 +230,8 @@ def main():
             if methodCfg.ground_truth_im is not None:
                 # ssim and psnr metrics for im quality
                 pred_n, gt_n = norm_2_ims_to_same_scale(y, methodCfg.ground_truth_im) # norm to [0,1]
+                print(f"[{meth.value}] pred min/max: {y.min():.4f} {y.max():.4f}")
+                print(f"[{meth.value}] gt min/max: {methodCfg.ground_truth_im.min():.4f} {methodCfg.ground_truth_im.max():.4f}")
                 ssim = structural_similarity(pred_n, gt_n, data_range=1.0)
                 ssim = float(np.clip(ssim, 0.0, 1.0)) # clip for floating-point noise above 1
                 runs_ssim.append(ssim)
