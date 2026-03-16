@@ -13,7 +13,7 @@ from skimage.metrics import structural_similarity, peak_signal_noise_ratio
 # Generic type
 T = TypeVar("T")
 
-from bench.utils import Configs, MethodConfigs, Payload_Out, ReconMethod, DATA, ROOT, RESULTS, SETUP_KWARGS, make_vds_ky_mask, norm_2_ims_to_same_scale
+from bench.utils import Configs, MethodConfigs, Payload_Out, ReconMethod, DATA, RESULTS, SETUP_KWARGS, make_vds_ky_mask, norm_2_ims_to_same_scale, measure_avg_power_watts, dummy_2_sec_fn
 from bench.methods import get_method_fxn, get_setup_fxn, get_cleanup_fxn
 from bench.data_loaders.m4raw import pick_first_h5, load_m4raw_kspace
 
@@ -56,45 +56,6 @@ def construct_dataclass_from_json(
     return datacls(**filtered)  # automatically constructs fields from strings while maintaining defaults
 
 
-def write_detailed_csv(results: list[Payload_Out], output_path: Path):
-    """
-    Write detailed CSV with all individual runs.
-    Format: Each row is one run, columns include method, run_idx, metric, value
-    """
-    rows = []
-    
-    for result in results:
-        method = result.method
-        
-        # Setup runs
-        for idx, (time_val, mem_val) in enumerate(zip(result.setup_time, result.setup_memory)):
-            rows.append({
-                "method": method,
-                "phase": "setup",
-                "run_idx": idx,
-                "time_s": time_val,
-                "memory_bytes": mem_val,
-            })
-        
-        # Steady-state runs
-        for idx, (time_val, mem_val) in enumerate(zip(result.runs_time, result.runs_memory)):
-            rows.append({
-                "method": method,
-                "phase": "run",
-                "run_idx": idx,
-                "time_s": time_val,
-                "memory_bytes": mem_val,
-            })
-    
-    if not rows:
-        return
-    
-    with open(output_path, 'w', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=["method", "phase", "run_idx", "time_s", "memory_bytes"])
-        writer.writeheader()
-        writer.writerows(rows)
-
-
 def write_summary_csv(results: list[Payload_Out], output_path: Path):
     """
     Write summary CSV with aggregated statistics.
@@ -119,6 +80,22 @@ def write_summary_csv(results: list[Payload_Out], output_path: Path):
             row["setup_time_std_s"] = None
             row["setup_memory_mean_MB"] = None
             row["setup_memory_std_MB"] = None
+
+        if len(result.runs_power) > 0:
+            row["run_power_avg_watts"] = np.mean(result.runs_power)
+            row["run_power_std_watts"] = np.std(result.runs_power)
+        else:
+            row["run_power_avg_watts"] = None
+            row["run_power_std_watts"] = None
+        
+        if len(result.setup_power) > 0:
+            row["setup_power_avg_watts"] = np.mean(result.setup_power)
+            row["setup_power_std_watts"] = np.std(result.setup_power)
+        else:
+            row["setup_power_avg_watts"] = None
+            row["setup_power_std_watts"] = None
+
+        row["avg_quiescent_gpu_pwr_watts"] = result.avg_quiescent_power
         
         # Run statistics
         row["run_time_mean_s"] = np.mean(result.runs_time)
@@ -147,13 +124,15 @@ def main():
     # (1) INIT CONFIGS
     cfg = Configs()
     methodCfg = MethodConfigs()
-    currMethod_ = ReconMethod.IFFT_BASE
 
     args = parse_args()
     if args.config is not None:
         cfg = construct_dataclass_from_json(args.config, Configs) # pass type itself
     print(cfg.methods, cfg.shape, cfg.dataset, cfg.setups, cfg.runs)
-    
+
+    # readout quiescent gpu power for reference rq
+    _, avg_quiescent_power_watts = measure_avg_power_watts(dummy_2_sec_fn, use_gpu=True)
+
     # (2) INPUT RAW K-SPACE DATA FROM DATASET
     match cfg.dataset:
         case "m4raw":
@@ -197,35 +176,54 @@ def main():
         all_results = [] # for csv export
 
     for meth in cfg.methods:
-        currMethod_ = meth
         recon = get_method_fxn(meth)
         setup = get_setup_fxn(meth, **SETUP_KWARGS.get(meth,{}))
         cleanup = get_cleanup_fxn(meth)
 
+        setup_iters = cfg.setups
+        if (cfg.train_new == True) and meth in [ReconMethod.UNET, ReconMethod.VARNET]:
+            setup_iters = 1
+
         # 1) setup (one-time cost for allocations, plans, buffers, model init, etc)
         setup_times = []
         setup_mem_use_peak = []
+        setup_power_avgs = []
+        setup_pwr = None
         if cfg.setups > 0:
-            for _ in range(cfg.setups):
+            for _ in range(setup_iters):
                 gc.collect()
                 if cfg.train_new and meth in [ReconMethod.UNET, ReconMethod.VARNET]:
                     # want to run training in setup, need to pass full ksp
-                    setup_mem, setup_time = setup(kspace_all, methodCfg)
+                    (setup_mem, setup_time), setup_pwr = measure_avg_power_watts (setup, 
+                        kspace_all, methodCfg, sampling_period_ms=methodCfg.training_power_sampling_period_ms, use_gpu=True)
+                elif meth in [ReconMethod.UNET, ReconMethod.VARNET]:
+                    (setup_mem, setup_time), setup_pwr = measure_avg_power_watts(setup, 
+                        kspace_in, methodCfg, sampling_period_ms=methodCfg.inference_power_sampling_period_ms, use_gpu=True)
                 else:
                     setup_mem, setup_time = setup(kspace_in, methodCfg)
                 setup_times.append(setup_time)
                 setup_mem_use_peak.append(setup_mem)
+                if setup_pwr is not None:
+                    setup_power_avgs.append(setup_pwr)
 
         # 2) steady-state running 
         runtimes = []
         runs_mem_use_peak = []
         runs_ssim = []
         runs_psnr = []
+        runs_power_avgs = []
+        avg_pwr = None
         for _ in range(cfg.runs):
             gc.collect() # reduce garbage noise between runs
-            y, peak, time_elapsed = recon(kspace_in, methodCfg)
+            if meth in [ReconMethod.UNET, ReconMethod.VARNET]:
+                (y, peak, time_elapsed), avg_pwr = measure_avg_power_watts(recon,
+                    kspace_in, methodCfg, sampling_period_ms=methodCfg.inference_power_sampling_period_ms, use_gpu=True)
+            else:
+                y, peak, time_elapsed = recon(kspace_in, methodCfg)
             runtimes.append(time_elapsed)
             runs_mem_use_peak.append(peak)
+            if avg_pwr is not None:
+                runs_power_avgs.append(avg_pwr)
             
             if methodCfg.ground_truth_im is not None:
                 # ssim and psnr metrics for im quality
@@ -243,13 +241,14 @@ def main():
             method = meth.value,
             shape = list(kspace_in.shape),
             runs_time = [float(t) for t in runtimes],
-            runs_power=[],
+            runs_power=runs_power_avgs if len(runs_power_avgs) > 0 else [],
             runs_memory=runs_mem_use_peak,
             setup_memory=setup_mem_use_peak,
-            setup_power=[],
+            setup_power=setup_power_avgs if len(setup_power_avgs) > 0 else [],
             setup_time=[float(t) for t in setup_times],
             runs_ssim=runs_ssim,
             runs_psnr=runs_psnr,
+            avg_quiescent_power=avg_quiescent_power_watts,
         )
         if cfg.output_level == "detail":
             all_results.append(out)
@@ -285,9 +284,7 @@ def main():
     if cfg.output_level == "detail":
         csv_dir = RESULTS / "csv"
         csv_dir.mkdir(parents=True, exist_ok=True)
-        detail_path = csv_dir / "benchmark_detailed.csv"
         summary_path = csv_dir / "benchmark_summary.csv"
-        write_detailed_csv(all_results, detail_path)
         write_summary_csv(all_results, summary_path)
 
 if __name__ == "__main__":
