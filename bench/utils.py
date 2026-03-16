@@ -4,6 +4,10 @@ from typing import List, Any
 import numpy as np
 import sigpy as sp
 from pathlib import Path
+import threading
+import time
+import concurrent.futures
+from pynvml import nvmlInit, nvmlDeviceGetHandleByIndex, nvmlDeviceGetPowerUsage
 
 # DATAPATHS
 
@@ -41,7 +45,7 @@ class Configs:
     shape: list[int] = field(default_factory=lambda: [256, 256])
     dataset: str = "m4raw"
     train_new: bool = True # for DL approaches whether we train a new model on the iter or reuse existing
-    setups: int = 1 # can be 0 if we want to omit setup tests
+    setups: int = 3 # can be 0 if we want to omit setup tests
     runs: int = 5
     bench_mode: str = "slice" # "slice" | "volume"
     save_ims: bool = True
@@ -52,6 +56,8 @@ class MethodConfigs:
     im_bit_depth: str = "float32"
     ground_truth_im: np.ndarray | None = None 
     state: dict[str, Any] = None
+    training_power_sampling_period_ms = 200
+    inference_power_sampling_period_ms = 50
 
     undersampling_mask: dict[str, Any] = field(default_factory=lambda:{
         "acs": 32,                     # ACS calibration region size (number of fully sampled ky lines in the center) -> from which weights are learned to interpolate missing k-space points
@@ -140,8 +146,9 @@ class Payload_Out:
     setup_memory: List[float]
     setup_power: List[float]
     runs_time: List[float]      # actual steady-state runs
-    runs_power: List[float]
+    runs_power: List[float]     # gpu only
     runs_memory: List[float]
+    avg_quiescent_power: float 
     # the following are optional entries; thus require default factory
     runs_ssim: List[float] = field(default_factory=list)
     runs_psnr: List[float] = field(default_factory=list)
@@ -227,3 +234,41 @@ def norm_2_ims_to_same_scale(pred, gt):
     pred = (pred - lo) / scale
     gt = (gt - lo) / scale
     return pred, gt
+
+
+# GPU POWER SAMPLING HELPERS FOR DL APPROACHES
+def measure_avg_power_watts(fn, *args, sampling_period_ms: int = 50, use_gpu: bool = False) -> tuple:
+    """
+    *args means we can accept any number of arguments (flexible) -> inputs to desired fn
+    for any function "fn":
+    Runs fn(*args), sampling GPU power in background if use_gpu = True
+    Then returns the fn's return (result) and the avg power
+    """
+    if not use_gpu:
+        return fn(*args), 0.0
+    
+    nvmlInit()
+    handle = nvmlDeviceGetHandleByIndex(0)
+
+    samples = [] # shared samples list
+    stop_sampling = threading.Event()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        executor.submit(sample_gpu_power_thread, samples, stop_sampling, sampling_period_ms, handle)
+        result = fn(*args)
+        stop_sampling.set()
+        # join threads happens automatically by threadpoolexecutor upon exiting 'with'
+
+    avg_pwr_mw = sum(samples)/len(samples) if len(samples) > 0 else 0.0
+    avg_pwr_w = avg_pwr_mw / 1000
+    return result, avg_pwr_w
+
+def sample_gpu_power_thread(samples: list, stop_event: threading.Event, sampling_period_ms: int, handle):
+    try:
+        while not stop_event.is_set():
+            samples.append(nvmlDeviceGetPowerUsage(handle))
+            time.sleep(sampling_period_ms / 1000)
+    except Exception:
+        pass # shouldn't be too strict in here
+
+def dummy_2_sec_fn():
+    time.sleep(2) # for initial quiescent power readout 
