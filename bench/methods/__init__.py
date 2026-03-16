@@ -4,6 +4,7 @@ from . import sense_espirit
 from functools import partial
 from . import grappa
 from . import dl_unet
+from . import dl_varnet
 
 '''
 METHODS ARHICTECTURE: each ReconMethod exposes:
@@ -20,6 +21,7 @@ METHODS = {
   ReconMethod.CS_L1: sense_espirit.run_l1wavelet_solver,
   ReconMethod.GRAPPA: grappa.run_grappa,
   ReconMethod.UNET: dl_unet.run_inference,
+  ReconMethod.VARNET: dl_varnet.run_inference,
 }
 
 # map recon method enum to prepare function
@@ -29,6 +31,7 @@ PREPARE_SETUP = {
     ReconMethod.CS_L1: sense_espirit.setup_and_espirit,
     ReconMethod.GRAPPA: grappa.preallocate_buffers,
     ReconMethod.UNET: dl_unet.run_training_and_prealloc,
+    ReconMethod.VARNET: dl_varnet.run_training_and_prealloc,
 }
 
 # map recon method enum to cleanup function after algo has completed fully
@@ -38,6 +41,7 @@ CLEANUP = {
     ReconMethod.CS_L1: sense_espirit.cleanup,
     ReconMethod.GRAPPA: grappa.cleanup,
     ReconMethod.UNET: dl_unet.cleanup,
+    ReconMethod.VARNET: dl_varnet.cleanup,
 }
 
 def get_method_fxn(method: ReconMethod):

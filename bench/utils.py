@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]   # mri-recon-bench/
 DATA = ROOT / "data"
 RESULTS = ROOT / "results"
 MODEL_REUSE_PATH = ROOT / "results/unet_m4raw.pt"
+MODEL_REUSE_PATH_VARNET = ROOT / "results/varnet_m4raw.pt"
 
 # ENUMS / DICTIONARIES
 
@@ -36,7 +37,7 @@ SETUP_KWARGS = {
 @dataclass
 class Configs:
     # default methods list factory :)
-    methods: list[ReconMethod] = field(default_factory=lambda: [ReconMethod.IFFT_BASE, ReconMethod.SENSE, ReconMethod.CS_L1, ReconMethod.GRAPPA, ReconMethod.UNET])
+    methods: list[ReconMethod] = field(default_factory=lambda: [ReconMethod.UNET, ReconMethod.VARNET, ReconMethod.CS_L1, ReconMethod.IFFT_BASE, ReconMethod.GRAPPA, ReconMethod.SENSE])
     shape: list[int] = field(default_factory=lambda: [256, 256])
     dataset: str = "m4raw"
     train_new: bool = True # for DL approaches whether we train a new model on the iter or reuse existing
@@ -70,7 +71,7 @@ class MethodConfigs:
     sense_espirit: dict[str, Any] = field(default_factory=lambda: {
         "debug_verify": True,       
         "sigpy_device": sp.Device(-1), # -1 represents CPU
-        "calib": 32,                   # [ky,kx] size of fully-sampled central k-space window used to estimate coil maps by ESPIRiT
+        "calib": 16,                   # [ky,kx] size of fully-sampled central k-space window used to estimate coil maps by ESPIRiT
         "thresh": 0.02,                # eigenvalue thresh for keeping sensitivity modes in ESPIRiT
         "kernel_width": 6,             # size of the convolution kernel used in ESPIRiT calibration (how many k-space neighbors are used to model coil correlations)
         "max_iter": 50,                # number of iterations for the SENSE solver
@@ -84,7 +85,7 @@ class MethodConfigs:
         "debug_verify": True,
         "sigpy_device": sp.Device(-1), 
         "ksp_dtype": np.complex128,    
-        "calib": 32,                   # [ky,kx] size of fully-sampled central k-space window used to estimate coil maps by ESPIRiT
+        "calib": 16,                   # [ky,kx] size of fully-sampled central k-space window used to estimate coil maps by ESPIRiT
         "thresh": 0.02,                # eigenvalue thresh for keeping sensitivity modes in ESPIRiT
         "kernel_width": 6,             # size of the convolution kernel used in ESPIRiT calibration (how many k-space neighbors are used to model coil correlations)
         "lambda": 1e-4,                # regularization , defaults 1e-3
@@ -114,6 +115,22 @@ class MethodConfigs:
         "n_decode_blks_to_freeze": 3, # how many we conserve from existing arch (no training on these) 
         "freeze_layers": False        # TODO: implement freeze functionality for faster training (not currently possible bcuz we don't have easily accessible pretrained weights from fastMRI on a general-purpose dataset)
     }) 
+
+    varnet: dict[str, Any] = field(default_factory=lambda: {
+        "seed": 42,
+        "simulate_undersampling": True,
+        "max_iters": 50,
+        "batch_size": 1,              # heavier than unet, so we keep at 1 on cpu
+        "lr": 1e-4,
+        "use_ifftshift": True,
+        "model_architecture": {
+            "num_cascades": 8,        # number of times data consistency + CNN refinement loop runs (more cascades = better but more compute/memory)
+            "pools": 4,               # DEPTH of the U-Net inside each cascade (i.e., how many times it downsamples -> pooling layers): going too low can cause aliasing artifacts
+            "chans": 18,              # channels (WIDTH) in the u-net refinement network for each cascade 
+            "sens_pools": 4,          # pooling layers in sensitivity map estimator (only runs once)
+            "sens_chans": 8,          # channels in sensitivity map estimator (only runs once)
+        }
+    })
 
 @dataclass
 class Payload_Out:
@@ -197,3 +214,16 @@ def kspace_to_x_image(kspace: np.ndarray, mask2d: np.ndarray, use_ifftshift: boo
     imgs = np.fft.ifft2(ksp_us, axes=(-2,-1), norm="ortho")
     imgs = np.fft.fftshift(imgs, axes=(-2,-1))
     return np.sqrt(np.sum(np.abs(imgs) ** 2, axis=0)).astype(np.float32)  # RSS -> (H,W)
+
+def norm_2_ims_to_same_scale(pred, gt):
+    pred = np.asarray(pred, dtype=np.float64)
+    gt = np.asarray(gt, dtype=np.float64)
+    lo = min(np.percentile(gt, 1), np.percentile(pred, 1))
+    hi = max(np.percentile(gt, 99), np.percentile(pred, 99))
+    pred = np.clip(pred, lo, hi)
+    gt = np.clip(gt, lo, hi)
+
+    scale = hi - lo + 1e-12
+    pred = (pred - lo) / scale
+    gt = (gt - lo) / scale
+    return pred, gt

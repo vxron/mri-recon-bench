@@ -5,7 +5,6 @@ import numpy as np
 import argparse
 from dataclasses import dataclass, fields, asdict
 from typing import TypeVar, Type
-import tracemalloc # to get pk memory usage throughout diff algos
 import gc
 import matplotlib.pyplot as plt
 import csv
@@ -14,7 +13,7 @@ from skimage.metrics import structural_similarity, peak_signal_noise_ratio
 # Generic type
 T = TypeVar("T")
 
-from bench.utils import Configs, MethodConfigs, Payload_Out, ReconMethod, DATA, ROOT, RESULTS, SETUP_KWARGS, make_vds_ky_mask
+from bench.utils import Configs, MethodConfigs, Payload_Out, ReconMethod, DATA, ROOT, RESULTS, SETUP_KWARGS, make_vds_ky_mask, norm_2_ims_to_same_scale
 from bench.methods import get_method_fxn, get_setup_fxn, get_cleanup_fxn
 from bench.data_loaders.m4raw import pick_first_h5, load_m4raw_kspace
 
@@ -229,11 +228,12 @@ def main():
             runs_mem_use_peak.append(peak)
             
             if methodCfg.ground_truth_im is not None:
-                pixel_range = float(methodCfg.ground_truth_im.max() - methodCfg.ground_truth_im.min())
                 # ssim and psnr metrics for im quality
-                ssim = structural_similarity(y, methodCfg.ground_truth_im, data_range=pixel_range)
+                pred_n, gt_n = norm_2_ims_to_same_scale(y, methodCfg.ground_truth_im) # norm to [0,1]
+                ssim = structural_similarity(pred_n, gt_n, data_range=1.0)
+                ssim = float(np.clip(ssim, 0.0, 1.0)) # clip for floating-point noise above 1
                 runs_ssim.append(ssim)
-                psnr = peak_signal_noise_ratio(methodCfg.ground_truth_im, y, data_range=pixel_range)
+                psnr = peak_signal_noise_ratio(pred_n, gt_n, data_range=1.0)
                 runs_psnr.append(psnr)
         
         # (6) GENERATE OUTPUT RESULTS

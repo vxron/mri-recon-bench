@@ -4,9 +4,10 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from pathlib import Path
 from fastmri.models.unet import Unet
+from fastmri.models import VarNet
 from dl.viz import plot_training_curve
 import numpy as np
-import sys
+from typing import Callable
 
 def freeze_encoder_and_decoder_up_to_n(model: Unet, n_decoder_blocks_to_freeze: int = 3):
     """
@@ -30,9 +31,9 @@ def freeze_encoder_and_decoder_up_to_n(model: Unet, n_decoder_blocks_to_freeze: 
     print(f"Trainable: {trainable:,} / {total:,} ({100*trainable/total:.1f}%)")
 
 
-def init_model(n_decoder_blocks_to_freeze: int = 3, *, device: torch.device = None, freeze_on: bool = False) -> tuple[Unet, torch.device]:
+def init_model(*, n_decoder_blocks_to_freeze: int = 3, reconMethod: str = "UNET", device: torch.device = None, freeze_on: bool = False, model_arch: dict = None) -> tuple[Unet, torch.device]:
     """
-    Instantiate the fastMRI U-Net and freeze appropriate layers.
+    Instantiate the fastMRI U-Net or VARNET and freeze appropriate layers.
     chans=32, num_pool_layers=4 matches Unet architecture.
     Returns model and device so callers don't have to repeat this boilerplate.
     """
@@ -40,8 +41,25 @@ def init_model(n_decoder_blocks_to_freeze: int = 3, *, device: torch.device = No
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Training on: {device}")
 
-    model = Unet(in_chans=1, out_chans=1, chans=32, num_pool_layers=4, drop_prob=0.0).to(device)
-    
+    if reconMethod == "UNET":
+        model = Unet(in_chans=1, out_chans=1, chans=32, num_pool_layers=4, drop_prob=0.0).to(device)
+    elif reconMethod == "VARNET":
+        num_cascades = model_arch.get("num_cascades", 8)
+        pools = model_arch.get("pools", 4)
+        chans = model_arch.get("chans", 18)
+        sens_pools = model_arch.get("sens_pools", 4)
+        sens_chans = model_arch.get("sens_chans", 8)
+        model = VarNet(
+            num_cascades=num_cascades,
+            pools=pools,
+            chans=chans,
+            sens_pools=sens_pools,
+            sens_chans=sens_chans,
+        ).to(device)
+    else:
+        print("issue w varnet/unet config")
+        return None
+
     if freeze_on:
         freeze_encoder_and_decoder_up_to_n(model, n_decoder_blocks_to_freeze)
     
@@ -70,6 +88,28 @@ def train_one_epoch(model: Unet, loader: DataLoader, optim: torch.optim.Optimize
         total += loss.item()
     return total / max(1, len(loader))
 
+def train_one_epoch_varnet(model: VarNet, loader: DataLoader, optim: torch.optim.Optimizer, device: torch.device) -> float:
+    model.train()
+    loss_fn = nn.L1Loss()
+    total = 0.0
+
+    for i, (ksp, mask, target) in enumerate(loader):
+        x, y, mask = ksp.to(device), target.to(device), mask.to(device)
+
+        #if i == 0:  # first batch only debug
+            #print("ksp shape:", x.shape)
+            #print("mask shape:", mask.shape)
+            #print("target shape:", y.shape)
+            #print("ksp min/max:", x.min().item(), x.max().item())
+            #print("target min/max:", y.min().item(), y.max().item())
+        
+        pred = model(x, mask.bool()) # varnet's fwd call is model(ksp,mask) *uses mask explicitly to keep dl predictions only for unsampled lines in ksp
+        loss = loss_fn(pred, y) 
+        optim.zero_grad()
+        loss.backward()
+        optim.step()
+        total += loss.item()
+    return total / max(1, len(loader))
 
 @torch.no_grad()
 def eval_one_epoch(model: Unet, loader: DataLoader, device: torch.device) -> float:
@@ -86,6 +126,15 @@ def eval_one_epoch(model: Unet, loader: DataLoader, device: torch.device) -> flo
         total += loss_fn(model(x), y).item()
     return total / max(1, len(loader))
 
+@torch.no_grad()
+def eval_one_epoch_varnet(model: VarNet, loader: DataLoader, device: torch.device) -> float:
+    model.eval()
+    loss_fn = nn.L1Loss()
+    total = 0.0
+    for ksp, mask, target in loader:
+        x, y, mask = ksp.to(device), target.to(device), mask.to(device)
+        total += loss_fn(model(x, mask.bool()), y).item()
+    return total / max(1, len(loader))
 
 def train(
     train_ds,
@@ -97,6 +146,8 @@ def train(
     n_decoder_blocks_to_freeze: int = 3,
     freeze_on: bool = False,
     debug: bool = False,
+    reconMethod: str = "UNET",
+    model_arch: dict = None,
     patience: int = 8, # for early stopping based on val (max consecutive no-improve epochs)
     min_delta: float = 1e-4 # minimum diff btwn 2 subsequent val losses to consider it a meaningful change
 ) -> str:
@@ -105,11 +156,13 @@ def train(
     Chooses best models based on lowest val loss (sequentially) for good generalization.
     This is the PUBLIC API USED.
     """
-    model, device = init_model(n_decoder_blocks_to_freeze, freeze_on=freeze_on)
+    if reconMethod == "UNET":
+        model, device = init_model(n_decoder_blocks_to_freeze=n_decoder_blocks_to_freeze, reconMethod="UNET", freeze_on=freeze_on)
+    elif reconMethod == "VARNET":
+        model, device = init_model(n_decoder_blocks_to_freeze=n_decoder_blocks_to_freeze, reconMethod="VARNET", model_arch=model_arch, freeze_on=freeze_on)
 
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,  num_workers=0)
     val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False, num_workers=0)
-
     # only pass trainable params to optimizer - passing frozen params wastes
     # memory on momentum/variance buffers that never get used
     optim = torch.optim.Adam(
@@ -123,9 +176,21 @@ def train(
     train_losses, val_losses = [], []
     epochs_no_val_improve = 0
 
+    trainer: Callable = None
+    validator: Callable = None
+    if reconMethod == "UNET":
+        trainer = train_one_epoch
+        validator = eval_one_epoch
+    elif reconMethod == "VARNET":
+        trainer = train_one_epoch_varnet
+        validator = eval_one_epoch_varnet
+    else:
+        print("issue w reconmethod setup in train()")
+        return
+
     for ep in range(epochs):
-        tr = train_one_epoch(model, train_loader, optim, device)
-        va = eval_one_epoch(model, val_loader, device)
+        tr = trainer(model, train_loader, optim, device)
+        va = validator(model, val_loader, device)
         scheduler.step(va)
 
         train_losses.append(tr)
@@ -141,9 +206,10 @@ def train(
                 "epoch": ep,
                 "model_state": model.state_dict(),
                 "val_loss": va,
-                "chans": 32,
-                "num_pool_layers": 4,
-                "n_decoder_blocks_to_freeze": n_decoder_blocks_to_freeze,
+                "chans": model_arch["chans"] if model_arch is not None else 32,
+                "num_pool_layers": model_arch["pools"] if model_arch is not None else 4,
+                "num_cascades": model_arch["num_cascades"] if model_arch is not None else 0,
+                "n_decoder_blocks_to_freeze": n_decoder_blocks_to_freeze if freeze_on else 0,
             }, out_ckpt)
             print(f"  saved -> {out_ckpt}")
         else:
