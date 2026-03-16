@@ -9,6 +9,7 @@ import tracemalloc # to get pk memory usage throughout diff algos
 import gc
 import matplotlib.pyplot as plt
 import csv
+from skimage.metrics import structural_similarity, peak_signal_noise_ratio
 
 # Generic type
 T = TypeVar("T")
@@ -125,6 +126,12 @@ def write_summary_csv(results: list[Payload_Out], output_path: Path):
         row["run_time_std_s"] = np.std(result.runs_time)
         row["run_memory_mean_MB"] = np.mean(result.runs_memory) / 1e6
         row["run_memory_std_MB"] = np.std(result.runs_memory) / 1e6
+
+        # Im quality statistics
+        row["ssim_mean"] = np.mean(result.runs_ssim) if result.runs_ssim else None
+        row["ssim_std"] = np.std(result.runs_ssim) if result.runs_ssim else None
+        row["psnr_mean_db"] = np.mean(result.runs_psnr) if result.runs_psnr else None
+        row["psnr_std_db"] = np.std(result.runs_psnr) if result.runs_psnr else None
         
         rows.append(row)
     
@@ -213,15 +220,22 @@ def main():
         # 2) steady-state running 
         runtimes = []
         runs_mem_use_peak = []
+        runs_ssim = []
+        runs_psnr = []
         for _ in range(cfg.runs):
             gc.collect() # reduce garbage noise between runs
             y, peak, time_elapsed = recon(kspace_in, methodCfg)
             runtimes.append(time_elapsed)
             runs_mem_use_peak.append(peak)
-
-        # reset state for next runs
-        cleanup(methodCfg)
-
+            
+            if methodCfg.ground_truth_im is not None:
+                pixel_range = float(methodCfg.ground_truth_im.max() - methodCfg.ground_truth_im.min())
+                # ssim and psnr metrics for im quality
+                ssim = structural_similarity(y, methodCfg.ground_truth_im, data_range=pixel_range)
+                runs_ssim.append(ssim)
+                psnr = peak_signal_noise_ratio(methodCfg.ground_truth_im, y, data_range=pixel_range)
+                runs_psnr.append(psnr)
+        
         # (6) GENERATE OUTPUT RESULTS
         out = Payload_Out(
             method = meth.value,
@@ -231,7 +245,9 @@ def main():
             runs_memory=runs_mem_use_peak,
             setup_memory=setup_mem_use_peak,
             setup_power=[],
-            setup_time=[float(t) for t in setup_times] 
+            setup_time=[float(t) for t in setup_times],
+            runs_ssim=runs_ssim,
+            runs_psnr=runs_psnr,
         )
         if cfg.output_level == "detail":
             all_results.append(out)

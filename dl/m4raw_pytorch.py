@@ -10,19 +10,20 @@
 import numpy as np
 import torch
 from bench.utils import kspace_to_x_image
+from torch.utils.data import Dataset
 
 def make_training_example_pair(kspace: np.ndarray, mask2d: np.ndarray, use_ifftshift: bool) -> tuple[np.ndarray, np.ndarray]:
     """
     Returns x, y as described above from kspace
     """
-
     kspace_y = kspace
     # apply mask for x:
     w = mask2d[None, ...]
     kspace_x = kspace * w
+    ones = np.ones(mask2d.shape, dtype=np.float32) # kspace_to_x_image expects mask arg
     # reconstruct
-    imx = kspace_to_x_image(kspace_x)
-    imy = kspace_to_x_image(kspace_y)
+    imx = kspace_to_x_image(kspace_x, ones, use_ifftshift=use_ifftshift)
+    imy = kspace_to_x_image(kspace_y, ones, use_ifftshift=use_ifftshift)
     # normalize        
     scale = np.percentile(imy, 99) + 1e-12
     imx = (imx / scale).astype(np.float32)
@@ -57,4 +58,6 @@ def train_val_split(kspace_slices, mask2d, use_ifftshift, val_frac=0.1, seed=42)
     n_val = max(1, int(len(indices)*val_frac))
     val_idx = indices[:n_val]
     train_idx = indices[n_val:]
+    train_slices = [kspace_slices[i] for i in train_idx]
+    val_slices = [kspace_slices[i] for i in val_idx]
     return M4RawSlices(train_slices, mask2d, use_ifftshift), M4RawSlices(val_slices, mask2d, use_ifftshift)

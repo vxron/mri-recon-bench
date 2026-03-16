@@ -4,8 +4,9 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from pathlib import Path
 from fastmri.models.unet import Unet
+from dl.viz import plot_training_curve
 import numpy as np
-    import sys
+import sys
 
 def freeze_encoder_and_decoder_up_to_n(model: Unet, n_decoder_blocks_to_freeze: int = 3):
     """
@@ -29,7 +30,7 @@ def freeze_encoder_and_decoder_up_to_n(model: Unet, n_decoder_blocks_to_freeze: 
     print(f"Trainable: {trainable:,} / {total:,} ({100*trainable/total:.1f}%)")
 
 
-def init_model(n_decoder_blocks_to_freeze: int = 3, device: torch.device = None) -> tuple[Unet, torch.device]:
+def init_model(n_decoder_blocks_to_freeze: int = 3, *, device: torch.device = None, freeze_on: bool = False) -> tuple[Unet, torch.device]:
     """
     Instantiate the fastMRI U-Net and freeze appropriate layers.
     chans=32, num_pool_layers=4 matches Unet architecture.
@@ -40,7 +41,13 @@ def init_model(n_decoder_blocks_to_freeze: int = 3, device: torch.device = None)
     print(f"Training on: {device}")
 
     model = Unet(in_chans=1, out_chans=1, chans=32, num_pool_layers=4, drop_prob=0.0).to(device)
-    freeze_encoder_and_decoder_up_to_n(model, n_decoder_blocks_to_freeze)
+    
+    if freeze_on:
+        freeze_encoder_and_decoder_up_to_n(model, n_decoder_blocks_to_freeze)
+    
+    trainable = sum(p.numel() for p in model.parameters())
+    print(f"Training from scratch: {trainable:,} params")
+    
     return model, device
 
 
@@ -88,12 +95,17 @@ def train(
     batch_size: int = 2,
     lr: float = 1e-4,
     n_decoder_blocks_to_freeze: int = 3,
+    freeze_on: bool = False,
+    debug: bool = False,
+    patience: int = 8, # for early stopping based on val (max consecutive no-improve epochs)
+    min_delta: float = 1e-4 # minimum diff btwn 2 subsequent val losses to consider it a meaningful change
 ) -> str:
     """
     Full training loop. 
     Chooses best models based on lowest val loss (sequentially) for good generalization.
+    This is the PUBLIC API USED.
     """
-    model, device = build_model(n_decoder_blocks_to_freeze)
+    model, device = init_model(n_decoder_blocks_to_freeze, freeze_on=freeze_on)
 
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,  num_workers=0)
     val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False, num_workers=0)
@@ -109,6 +121,7 @@ def train(
     Path(out_ckpt).parent.mkdir(parents=True, exist_ok=True)
     best_val = float("inf")
     train_losses, val_losses = [], []
+    epochs_no_val_improve = 0
 
     for ep in range(epochs):
         tr = train_one_epoch(model, train_loader, optim, device)
@@ -119,8 +132,11 @@ def train(
         val_losses.append(va)
         print(f"epoch {ep+1:03d}  train={tr:.5f}  val={va:.5f}  lr={optim.param_groups[0]['lr']:.2e}")
 
-        if va < best_val:
+        if va < best_val and (best_val - va) >= min_delta:
             best_val = va
+            # reset "no-improve" counter
+            epochs_no_val_improve = 0
+            # the 'save' step saves the model w the appropriate new changes
             torch.save({
                 "epoch": ep,
                 "model_state": model.state_dict(),
@@ -130,8 +146,16 @@ def train(
                 "n_decoder_blocks_to_freeze": n_decoder_blocks_to_freeze,
             }, out_ckpt)
             print(f"  saved -> {out_ckpt}")
+        else:
+            epochs_no_val_improve += 1
+            if epochs_no_val_improve >= patience:
+                print(f"  early stop at epoch {ep+1} (no improvement for {patience} epochs)")
+                break
+    
+    if debug: 
+        out_dir = Path(out_ckpt).parent / "plots"
+        out_dir.mkdir(exist_ok=True)
+        plot_training_curve(train_losses, val_losses, out_dir / "training_curve.png")
 
     return out_ckpt, train_losses, val_losses
 
-
-if __

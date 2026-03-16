@@ -26,8 +26,8 @@ SETUP_KWARGS = {
     ReconMethod.SENSE: {"curr_method": ReconMethod.SENSE},
     ReconMethod.CS_L1: {"curr_method": ReconMethod.CS_L1},
     ReconMethod.GRAPPA: {}, # no addtn kwargs
-    ReconMethod.IFFT_BASE: {} # no addtn kwargs
-    ReconMethod.UNET: {"train_new": False} # set at runtime
+    ReconMethod.IFFT_BASE: {}, # no addtn kwargs
+    ReconMethod.UNET: {"train_new": False}, # set at runtime
     ReconMethod.VARNET: {"train_new": False} # set at runtime
 }
 
@@ -36,11 +36,11 @@ SETUP_KWARGS = {
 @dataclass
 class Configs:
     # default methods list factory :)
-    methods: list[ReconMethod] = field(default_factory=lambda: [ReconMethod.IFFT_BASE, ReconMethod.SENSE, ReconMethod.CS_L1, ReconMethod.GRAPPA])
+    methods: list[ReconMethod] = field(default_factory=lambda: [ReconMethod.IFFT_BASE, ReconMethod.SENSE, ReconMethod.CS_L1, ReconMethod.GRAPPA, ReconMethod.UNET])
     shape: list[int] = field(default_factory=lambda: [256, 256])
     dataset: str = "m4raw"
     train_new: bool = True # for DL approaches whether we train a new model on the iter or reuse existing
-    setups: int = 3 # can be 0 if we want to omit setup tests
+    setups: int = 1 # can be 0 if we want to omit setup tests
     runs: int = 5
     bench_mode: str = "slice" # "slice" | "volume"
     save_ims: bool = True
@@ -79,6 +79,7 @@ class MethodConfigs:
         "simulate_undersampling": False 
     })
 
+    # the default_factory tells dataclass to call the lambda each time a new instance is created so every instances gets its own fresh dict instance
     cs_l1_wavelet: dict[str, Any] = field(default_factory= lambda: {
         "debug_verify": True,
         "sigpy_device": sp.Device(-1), 
@@ -104,12 +105,14 @@ class MethodConfigs:
     })
 
     unet: dict[str, Any] = field(default_factory=lambda: {
+        "seed": 42,                   # seed for repeatable masks/runs
         "simulate_undersampling": True,
-        "max_iters": 30,              # max training iters
-        "batch_size": 2               # num of examples per training epoch
+        "max_iters": 100,             # max training iters (should be lower when just fine-tuning outer layers - i.e. encoder freezing - but otherwise 50-100)
+        "batch_size": 2,              # num of examples per training epoch
         "lr": 1e-4,                   # learning rate during training steps
         "use_ifftshift": True,        # for when DC has been centered in kspace 
-        "n_decode_blks_to_freeze": 3  # how many we conserve from existing arch (no training on these) 
+        "n_decode_blks_to_freeze": 3, # how many we conserve from existing arch (no training on these) 
+        "freeze_layers": False        # TODO: implement freeze functionality for faster training (not currently possible bcuz we don't have easily accessible pretrained weights from fastMRI on a general-purpose dataset)
     }) 
 
 @dataclass
@@ -122,6 +125,9 @@ class Payload_Out:
     runs_time: List[float]      # actual steady-state runs
     runs_power: List[float]
     runs_memory: List[float]
+    # the following are optional entries; thus require default factory
+    runs_ssim: List[float] = field(default_factory=list)
+    runs_psnr: List[float] = field(default_factory=list)
 
 # HELPER FUNCTIONS
 
