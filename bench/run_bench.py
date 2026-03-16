@@ -5,15 +5,15 @@ import numpy as np
 import argparse
 from dataclasses import dataclass, fields, asdict
 from typing import TypeVar, Type
-import tracemalloc # to get pk memory usage throughout diff algos
 import gc
 import matplotlib.pyplot as plt
 import csv
+from skimage.metrics import structural_similarity, peak_signal_noise_ratio
 
 # Generic type
 T = TypeVar("T")
 
-from bench.utils import Configs, MethodConfigs, Payload_Out, ReconMethod, DATA, ROOT, RESULTS, SETUP_KWARGS
+from bench.utils import Configs, MethodConfigs, Payload_Out, ReconMethod, DATA, ROOT, RESULTS, SETUP_KWARGS, make_vds_ky_mask, norm_2_ims_to_same_scale
 from bench.methods import get_method_fxn, get_setup_fxn, get_cleanup_fxn
 from bench.data_loaders.m4raw import pick_first_h5, load_m4raw_kspace
 
@@ -125,6 +125,12 @@ def write_summary_csv(results: list[Payload_Out], output_path: Path):
         row["run_time_std_s"] = np.std(result.runs_time)
         row["run_memory_mean_MB"] = np.mean(result.runs_memory) / 1e6
         row["run_memory_std_MB"] = np.std(result.runs_memory) / 1e6
+
+        # Im quality statistics
+        row["ssim_mean"] = np.mean(result.runs_ssim) if result.runs_ssim else None
+        row["ssim_std"] = np.std(result.runs_ssim) if result.runs_ssim else None
+        row["psnr_mean_db"] = np.mean(result.runs_psnr) if result.runs_psnr else None
+        row["psnr_std_db"] = np.std(result.runs_psnr) if result.runs_psnr else None
         
         rows.append(row)
     
@@ -153,7 +159,7 @@ def main():
         case "m4raw":
             DATA_M4RAW = DATA / "m4raw_zenodo" / "multicoil_test"
             h5_path = pick_first_h5(DATA_M4RAW)
-            kspace_in, rss_gt, meta = load_m4raw_kspace(h5_path)
+            kspace_all, rss_gt, meta = load_m4raw_kspace(h5_path)
             print("Loaded M4Raw:", h5_path.name)
             print("Keys:", meta["keys"])
             print("Attrs:", meta["attrs"])
@@ -163,10 +169,10 @@ def main():
             return
     
     # (3) SETUP CONFIGS & PREPROCESS TO FIT EXPECTED SHAPE FOR RECON METHOD 
-    if kspace_in.ndim == 4 and cfg.bench_mode == "slice": # often given (S,C,H,W), ex. in m4raw
+    if kspace_all.ndim == 4 and cfg.bench_mode == "slice": # often given (S,C,H,W), ex. in m4raw
         # narrow to a single z-slice -> (C,H,W)
-        S = kspace_in.shape[0]
-        kspace_in = kspace_in[S // 2] # select the middle slice
+        S = kspace_all.shape[0]
+        kspace_in = kspace_all[S // 2] # select the middle slice
         rss_gt_slice = rss_gt[S // 2] 
         if rss_gt_slice is not None:
             methodCfg.ground_truth_im = rss_gt_slice
@@ -174,9 +180,22 @@ def main():
             methodCfg.ground_truth_im = None
         print("Input to recon:", kspace_in.shape, kspace_in.dtype, "ndim", kspace_in.ndim)
 
-    # (4) RUN RECON METHOD
+    # (4) BUILD REUSABLE UNDERSAMPLING MASK IN KY
+    # for the methods that work on undersampled k-space (simulate_undersampling true)
+    H, W = kspace_in.shape[1], kspace_in.shape[2]
+    R = methodCfg.undersampling_mask.get("R", 2)
+    acs = methodCfg.undersampling_mask.get("acs", 32)
+    seed = methodCfg.undersampling_mask.get("seed", 42)
+    shared_mask = make_vds_ky_mask(H, W, R=R, acs=acs, seed=seed)
+    methodCfg.undersampling_mask["mask2d"] = shared_mask
+
+    # (5) RUN RECON METHOD
+    if cfg.train_new == True:
+        SETUP_KWARGS[ReconMethod.UNET]["train_new"] = True
+        SETUP_KWARGS[ReconMethod.VARNET]["train_new"] = True
     if cfg.output_level == "detail":
         all_results = [] # for csv export
+
     for meth in cfg.methods:
         currMethod_ = meth
         recon = get_method_fxn(meth)
@@ -189,23 +208,37 @@ def main():
         if cfg.setups > 0:
             for _ in range(cfg.setups):
                 gc.collect()
-                setup_mem, setup_time = setup(kspace_in, methodCfg)
+                if cfg.train_new and meth in [ReconMethod.UNET, ReconMethod.VARNET]:
+                    # want to run training in setup, need to pass full ksp
+                    setup_mem, setup_time = setup(kspace_all, methodCfg)
+                else:
+                    setup_mem, setup_time = setup(kspace_in, methodCfg)
                 setup_times.append(setup_time)
                 setup_mem_use_peak.append(setup_mem)
 
         # 2) steady-state running 
         runtimes = []
         runs_mem_use_peak = []
+        runs_ssim = []
+        runs_psnr = []
         for _ in range(cfg.runs):
             gc.collect() # reduce garbage noise between runs
             y, peak, time_elapsed = recon(kspace_in, methodCfg)
             runtimes.append(time_elapsed)
             runs_mem_use_peak.append(peak)
-
-        # reset state for next runs
-        cleanup(methodCfg)
-
-        # (5) GENERATE OUTPUT RESULTS
+            
+            if methodCfg.ground_truth_im is not None:
+                # ssim and psnr metrics for im quality
+                pred_n, gt_n = norm_2_ims_to_same_scale(y, methodCfg.ground_truth_im) # norm to [0,1]
+                print(f"[{meth.value}] pred min/max: {y.min():.4f} {y.max():.4f}")
+                print(f"[{meth.value}] gt min/max: {methodCfg.ground_truth_im.min():.4f} {methodCfg.ground_truth_im.max():.4f}")
+                ssim = structural_similarity(pred_n, gt_n, data_range=1.0)
+                ssim = float(np.clip(ssim, 0.0, 1.0)) # clip for floating-point noise above 1
+                runs_ssim.append(ssim)
+                psnr = peak_signal_noise_ratio(pred_n, gt_n, data_range=1.0)
+                runs_psnr.append(psnr)
+        
+        # (6) GENERATE OUTPUT RESULTS
         out = Payload_Out(
             method = meth.value,
             shape = list(kspace_in.shape),
@@ -214,7 +247,9 @@ def main():
             runs_memory=runs_mem_use_peak,
             setup_memory=setup_mem_use_peak,
             setup_power=[],
-            setup_time=[float(t) for t in setup_times] 
+            setup_time=[float(t) for t in setup_times],
+            runs_ssim=runs_ssim,
+            runs_psnr=runs_psnr,
         )
         if cfg.output_level == "detail":
             all_results.append(out)
@@ -243,7 +278,7 @@ def main():
         out_path.write_text(json.dumps(out_json, indent=2))
         print(f"Wrote {out_path}")
 
-        # (6) CLEANUP FOR NEXT METHOD
+        # (7) CLEANUP FOR NEXT METHOD
         cleanup(methodCfg)
     
     # All data collected -> Write CSV logs

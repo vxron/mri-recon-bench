@@ -10,13 +10,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]   # mri-recon-bench/
 DATA = ROOT / "data"
 RESULTS = ROOT / "results"
+MODEL_REUSE_PATH = ROOT / "results/unet_m4raw.pt"
+MODEL_REUSE_PATH_VARNET = ROOT / "results/varnet_m4raw.pt"
 
 # ENUMS / DICTIONARIES
 
 class ReconMethod(str, Enum):
     CS_L1 = "cs_l1wavelet"
     UNET = "dl_unet"
-    SWIN = "dl_swin"
+    VARNET = "dl_varnet"
     IFFT_BASE = "baseline_ifft"
     SENSE = "sense_espirit"
     GRAPPA = "grappa"
@@ -25,7 +27,9 @@ SETUP_KWARGS = {
     ReconMethod.SENSE: {"curr_method": ReconMethod.SENSE},
     ReconMethod.CS_L1: {"curr_method": ReconMethod.CS_L1},
     ReconMethod.GRAPPA: {}, # no addtn kwargs
-    ReconMethod.IFFT_BASE: {}
+    ReconMethod.IFFT_BASE: {}, # no addtn kwargs
+    ReconMethod.UNET: {"train_new": False}, # set at runtime
+    ReconMethod.VARNET: {"train_new": False} # set at runtime
 }
 
 # DATACLASSES
@@ -33,10 +37,11 @@ SETUP_KWARGS = {
 @dataclass
 class Configs:
     # default methods list factory :)
-    methods: list[ReconMethod] = field(default_factory=lambda: [ReconMethod.IFFT_BASE, ReconMethod.SENSE, ReconMethod.CS_L1, ReconMethod.GRAPPA])
+    methods: list[ReconMethod] = field(default_factory=lambda: [ReconMethod.CS_L1, ReconMethod.IFFT_BASE, ReconMethod.GRAPPA, ReconMethod.SENSE, ReconMethod.UNET, ReconMethod.VARNET])
     shape: list[int] = field(default_factory=lambda: [256, 256])
     dataset: str = "m4raw"
-    setups: int = 3 # can be 0 if we want to omit setup tests
+    train_new: bool = True # for DL approaches whether we train a new model on the iter or reuse existing
+    setups: int = 1 # can be 0 if we want to omit setup tests
     runs: int = 5
     bench_mode: str = "slice" # "slice" | "volume"
     save_ims: bool = True
@@ -48,29 +53,39 @@ class MethodConfigs:
     ground_truth_im: np.ndarray | None = None 
     state: dict[str, Any] = None
 
+    undersampling_mask: dict[str, Any] = field(default_factory=lambda:{
+        "acs": 32,                     # ACS calibration region size (number of fully sampled ky lines in the center) -> from which weights are learned to interpolate missing k-space points
+        "R": 2,                        # acceleration factor (how much of the data was undersampled)
+        "seed": 42,                    # for deterministic runs
+        "mask2d": None,                # created once at bench startup, shared across all methods
+    })
+
     # method specific configs
     baseline_ifft: dict[str, Any] = field(default_factory=lambda:{
-        "use_ifftshift": True, # for when DC has been centered in kspace 
+        "use_ifftshift": True,         # for when DC has been centered in kspace 
         "norm": "ortho",
         "debug_verify": False,
+        "simulate_undersampling": False 
     })
     
     sense_espirit: dict[str, Any] = field(default_factory=lambda: {
         "debug_verify": True,       
         "sigpy_device": sp.Device(-1), # -1 represents CPU
-        "calib": 32,                   # [ky,kx] size of fully-sampled central k-space window used to estimate coil maps by ESPIRiT
+        "calib": 16,                   # [ky,kx] size of fully-sampled central k-space window used to estimate coil maps by ESPIRiT
         "thresh": 0.02,                # eigenvalue thresh for keeping sensitivity modes in ESPIRiT
         "kernel_width": 6,             # size of the convolution kernel used in ESPIRiT calibration (how many k-space neighbors are used to model coil correlations)
         "max_iter": 50,                # number of iterations for the SENSE solver
-        "lambda": 5e-3,               # regularization strength (0.0 is pure SENSE = no regularization)
-        "ksp_dtype": np.complex128     # start with complex64, also complex128 for more accuracy/lower efficiency
+        "lambda": 5e-3,                # regularization strength (0.0 is pure SENSE = no regularization)
+        "ksp_dtype": np.complex128,    # start with complex64, also complex128 for more accuracy/lower efficiency
+        "simulate_undersampling": True 
     })
 
+    # the default_factory tells dataclass to call the lambda each time a new instance is created so every instances gets its own fresh dict instance
     cs_l1_wavelet: dict[str, Any] = field(default_factory= lambda: {
         "debug_verify": True,
         "sigpy_device": sp.Device(-1), 
         "ksp_dtype": np.complex128,    
-        "calib": 32,                   # [ky,kx] size of fully-sampled central k-space window used to estimate coil maps by ESPIRiT
+        "calib": 16,                   # [ky,kx] size of fully-sampled central k-space window used to estimate coil maps by ESPIRiT
         "thresh": 0.02,                # eigenvalue thresh for keeping sensitivity modes in ESPIRiT
         "kernel_width": 6,             # size of the convolution kernel used in ESPIRiT calibration (how many k-space neighbors are used to model coil correlations)
         "lambda": 1e-4,                # regularization , defaults 1e-3
@@ -78,22 +93,44 @@ class MethodConfigs:
         "wavelet_basis": "db4",        # wavelet transform basis kernel that gets slid over image for decomposing into wavelets... 
                                        # db4 is standard default for mri; '4' refers to how many polynomial orders the wavelet "ignores" for better rep of curves
                                        # alternative: Haar's template [1, 1, -1, -1]: fires at edges (sees boxy transitions)
-        "acs": 32,                     # fully sampled center of k-space (number of fully sampled central lines)
-        "R": 2,                        # acceleration factor (how much of the data was undersampled)
-        "simulate_undersampling": True # for fully acquired k-space datasets, need to simulate undersampling for cs to be tested appropriately
+        "simulate_undersampling": True
     })
 
     grappa: dict[str, Any] = field(default_factory=lambda: {
-        "calib": 32,                   # ACS calibration region size (number of fully sampled ky lines in the center) -> from which weights are learned to interpolate missing k-space points
         "kernel_size": (6,6),          # GRAPPA kernel size in (ky,kx), i.e. local neighborhood used to interpolate missing samples
         "coil_axis": 0,                # which axis is the coil dimension in kspace (C,H,W), axis C contains coils
         "debug_verify": False,
         "lambda": 1e-3,        
         "ksp_dtype": np.complex128,
-        "R": 2,
         "simulate_undersampling": True # for fully acquired k-space datasets, need to simulate undersampling for cs to be tested appropriately
     })
 
+    unet: dict[str, Any] = field(default_factory=lambda: {
+        "seed": 42,                   # seed for repeatable masks/runs
+        "simulate_undersampling": True,
+        "max_iters": 100,             # max training iters (should be lower when just fine-tuning outer layers - i.e. encoder freezing - but otherwise 50-100)
+        "batch_size": 2,              # num of examples per training epoch
+        "lr": 1e-4,                   # learning rate during training steps
+        "use_ifftshift": True,        # for when DC has been centered in kspace 
+        "n_decode_blks_to_freeze": 3, # how many we conserve from existing arch (no training on these) 
+        "freeze_layers": False        # TODO: implement freeze functionality for faster training (not currently possible bcuz we don't have easily accessible pretrained weights from fastMRI on a general-purpose dataset)
+    }) 
+
+    varnet: dict[str, Any] = field(default_factory=lambda: {
+        "seed": 42,
+        "simulate_undersampling": True,
+        "max_iters": 50,
+        "batch_size": 1,              # heavier than unet, so we keep at 1 on cpu
+        "lr": 1e-4,
+        "use_ifftshift": True,
+        "model_architecture": {
+            "num_cascades": 8,        # number of times data consistency + CNN refinement loop runs (more cascades = better but more compute/memory)
+            "pools": 4,               # DEPTH of the U-Net inside each cascade (i.e., how many times it downsamples -> pooling layers): going too low can cause aliasing artifacts
+            "chans": 18,              # channels (WIDTH) in the u-net refinement network for each cascade 
+            "sens_pools": 4,          # pooling layers in sensitivity map estimator (only runs once)
+            "sens_chans": 8,          # channels in sensitivity map estimator (only runs once)
+        }
+    })
 
 @dataclass
 class Payload_Out:
@@ -105,6 +142,9 @@ class Payload_Out:
     runs_time: List[float]      # actual steady-state runs
     runs_power: List[float]
     runs_memory: List[float]
+    # the following are optional entries; thus require default factory
+    runs_ssim: List[float] = field(default_factory=list)
+    runs_psnr: List[float] = field(default_factory=list)
 
 # HELPER FUNCTIONS
 
@@ -164,3 +204,26 @@ def make_vds_ky_mask(H: int, W: int, *, R: int, acs: int, seed: int = 42) -> np.
 
     return mask
 
+def kspace_to_x_image(kspace: np.ndarray, mask2d: np.ndarray, use_ifftshift: bool) -> np.ndarray:
+    """
+    Shared preprocessing: masked kspace -> zero-filled magnitude image (H,W) 
+    Used in training & inference of image-to-image DL methods
+    """
+    ksp_us = kspace * mask2d[None, ...]
+    ksp_us = np.fft.ifftshift(ksp_us, axes=(-2,-1)) if use_ifftshift else ksp_us
+    imgs = np.fft.ifft2(ksp_us, axes=(-2,-1), norm="ortho")
+    imgs = np.fft.fftshift(imgs, axes=(-2,-1))
+    return np.sqrt(np.sum(np.abs(imgs) ** 2, axis=0)).astype(np.float32)  # RSS -> (H,W)
+
+def norm_2_ims_to_same_scale(pred, gt):
+    pred = np.asarray(pred, dtype=np.float64)
+    gt = np.asarray(gt, dtype=np.float64)
+    lo = min(np.percentile(gt, 1), np.percentile(pred, 1))
+    hi = max(np.percentile(gt, 99), np.percentile(pred, 99))
+    pred = np.clip(pred, lo, hi)
+    gt = np.clip(gt, lo, hi)
+
+    scale = hi - lo + 1e-12
+    pred = (pred - lo) / scale
+    gt = (gt - lo) / scale
+    return pred, gt
